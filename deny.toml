@@ -1,0 +1,12 @@
+[advisories]
+yanked = "deny"
+
+[bans]
+multiple-versions = "warn"
+
+[licenses]
+# CDLA-Permissive-2.0 covers `webpki-roots`, the Mozilla CA bundle. It reaches
+# this graph only through the vendored libhwloc build, which downloads the hwloc
+# release over TLS at build time; nothing from that subtree is linked into a
+# shipped binary. Turning off the `vendored` feature removes it entirely.
+allow = ["MIT", "Apache-2.0", "BSD-3-Clause", "CDLA-Permissive-2.0", "ISC", "Unicode-3.0", "Zlib"]

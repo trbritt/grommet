@@ -1,0 +1,22 @@
+[package]
+name = "grommet-core"
+description = "Key-affine fair scheduling as a pure, runtime-free data structure"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+exclude.workspace = true
+documentation = "https://docs.rs/grommet-core"
+keywords = ["scheduler", "fairness", "round-robin", "queue", "sharding"]
+categories = ["data-structures", "concurrency", "algorithms"]
+
+[lints.rust]
+unexpected_cfgs = { level = "deny", check-cfg = ["cfg(coverage)"] }
+
+[dependencies]
+ahash = "0.8"
+grommet-macros = { workspace = true }

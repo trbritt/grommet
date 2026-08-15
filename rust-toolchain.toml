@@ -1,0 +1,5 @@
+[toolchain]
+# MC/DC instrumentation, sanitizers, and Miri are toolchain-sensitive. Pinning
+# makes local and CI evidence comparable and failures replayable.
+channel = "nightly-2026-05-01"
+components = ["rustfmt", "clippy", "llvm-tools-preview", "miri", "rust-src"]

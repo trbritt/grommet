@@ -1,0 +1,12 @@
+/target
+
+# Editor state. `.idea/` rather than `*.idea`, which matched only by the
+# accident of `*` accepting an empty string.
+.idea/
+
+# Mutation-testing output, including the rotated previous run.
+mutants.out*/
+
+# Bolero keeps reproducers under the crate it fuzzes; the corpus is generated.
+crash-*
+fuzz/corpus/

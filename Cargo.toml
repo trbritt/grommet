@@ -1,0 +1,55 @@
+[workspace]
+resolver = "2"
+members = ["crates/*", "examples/accounts"]
+
+# Shared by every member. `description`, `keywords` and `categories` stay
+# per-crate: they are what tells the six apart on crates.io.
+[workspace.package]
+version = "0.1.1"
+edition = "2024"
+rust-version = "1.88.0"
+authors = ["Tristan Britt <hello@tbritt.xyz>"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/trbritt/grommet"
+homepage = "https://github.com/trbritt/grommet"
+readme = "README.md"
+# Evidence output and editor state are not part of a release. `assets` is
+# excluded too, so the README's hero image resolves against the repository
+# rather than shipping in every `.crate`.
+exclude = [
+    ".github/",
+    ".idea/",
+    "assets/",
+    "mutants.out*/",
+    "scripts/",
+]
+
+[workspace.dependencies]
+grommet = { version = "0.1.1", path = "crates/grommet", default-features = false }
+grommet-core = { version = "0.1.1", path = "crates/grommet-core" }
+grommet-macros = { version = "0.1.1", path = "crates/grommet-macros" }
+grommet-offload = { version = "0.1.1", path = "crates/grommet-offload", default-features = false }
+grommet-testkit = { version = "0.1.1", path = "crates/grommet-testkit", default-features = false }
+grommet-topology = { version = "0.1.1", path = "crates/grommet-topology", default-features = false }
+
+[profile.release]
+opt-level     = 3
+lto           = "thin"
+codegen-units = 1
+# A panicking offload worker must fail its own caller, not abort the process.
+panic         = "unwind"
+
+# Optimized, but with assertions and invariant checks left in. Deterministic
+# simulation runs under this.
+[profile.sim]
+inherits = "release"
+debug-assertions = true
+overflow-checks = true
+panic = "unwind"
+
+[profile.fuzz]
+inherits = "release"
+debug = 1
+debug-assertions = true
+overflow-checks = true
+panic = "unwind"

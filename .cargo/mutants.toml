@@ -1,0 +1,32 @@
+# Run the cross-crate conformance, fault and Turmoil harnesses for every mutant.
+# Without this, cargo-mutants only tests the package containing the mutation.
+test_workspace = true
+
+# Score decision-bearing behaviour that deterministic tests can reach.
+# Infrastructure and adapters are a separate evidence domain: a green simulator
+# cannot prove SQL, wire-protocol or pool-configuration truth.
+exclude_globs = [
+    "crates/grommet-macros/**",
+    "crates/grommet-offload/**",
+    "crates/grommet-testkit/**",
+    # Placement is decided from the machine hwloc reports. Most of the branches
+    # here exist for hardware no single runner has at once — hybrid P/E cores,
+    # multiple sockets, a cgroup bandwidth limit — so a surviving mutant usually
+    # means the shape was absent, not that the assertion was weak. Its wrapper,
+    # `grommet/src/topology.rs`, is excluded for the same reason.
+    "crates/grommet-topology/**",
+    "crates/grommet/src/topology.rs",
+    "crates/grommet/src/runtime.rs",
+    "crates/grommet/src/metrics.rs",
+    "examples/accounts/src/prod.rs",
+    "examples/accounts/src/frontdoor.rs",
+    "examples/accounts/src/net.rs",
+    "examples/accounts/src/main.rs",
+    "examples/accounts/benches/**",
+]
+
+# `check_invariants` is the assertion the other tests are checked against, so
+# mutating it scores the checker rather than the scheduler. Killing these would
+# take tests that corrupt scheduler state on purpose to prove the checker
+# notices, which is a different exercise from the one this gate is measuring.
+exclude_re = ["check_invariants"]

@@ -1,0 +1,28 @@
+syntax = "proto3";
+package xt.prime.v1;
+
+service AccountProcessor {
+  rpc Submit(SubmitRequest) returns (SubmitResponse);
+}
+
+message SubmitRequest {
+  string req_id = 1;
+  uint64 account = 2;
+  Kind kind = 3;
+  int64 amount = 4;
+  uint32 scenarios = 5;
+
+  enum Kind {
+    KIND_UNSPECIFIED = 0;
+    KIND_DEBIT = 1;
+    KIND_CREDIT = 2;
+    KIND_BALANCE = 3;
+    KIND_REVALUE = 4;
+  }
+}
+
+message SubmitResponse {
+  int64 balance = 1;
+  bool duplicate = 2;
+  string error = 3;
+}

@@ -1,0 +1,44 @@
+[package]
+name = "grommet"
+description = "Thread-per-core, key-affine work scheduling with hardware-aware placement"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+exclude.workspace = true
+documentation = "https://docs.rs/grommet"
+keywords = ["thread-per-core", "scheduler", "async", "sharding", "runtime"]
+categories = ["asynchronous", "concurrency", "network-programming"]
+
+[lints.rust]
+unexpected_cfgs = { level = "deny", check-cfg = ["cfg(coverage)"] }
+
+[dependencies]
+ahash = "0.8"
+futures = "0.3"
+tokio = { version = "1", features = ["rt", "sync", "time", "macros"] }
+grommet-core = { workspace = true }
+# `default-features = false` so the vendored-versus-system libhwloc choice is
+# re-exported below rather than fixed here. A Cargo feature cannot turn off a
+# dependency's default, so a crate that wants to link the system library has to
+# be able to reach that switch from the top of the graph.
+grommet-topology = { workspace = true }
+
+[features]
+default = ["vendored"]
+
+# Build libhwloc from source. See `grommet-topology` for why that is the
+# default and what it costs.
+vendored = ["grommet-topology/vendored"]
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "sync", "time", "macros", "test-util"] }
+
+# See `grommet-topology`: the vendored libhwloc build needs network access,
+# which a docs.rs build does not have.
+[package.metadata.docs.rs]
+no-default-features = true

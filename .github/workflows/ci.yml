@@ -1,0 +1,176 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: "23 8 * * *"
+
+env:
+  CARGO_TERM_COLOR: always
+
+# The toolchain is pinned in rust-toolchain.toml, which rustup honours for every
+# cargo invocation here. Naming it per job keeps the component installs explicit,
+# and the pin is what makes local and CI evidence comparable.
+#
+# Each gate is its own job so a formatting slip cannot hide a test failure behind
+# it, and so the failing status names what actually broke.
+jobs:
+  format:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-05-01
+          components: rustfmt
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
+      - run: just fmt-check
+
+  # Placement is planned against libhwloc, which the default build compiles from
+  # a source tarball it downloads. The cache is not an optimisation here: without
+  # it every job re-downloads and re-builds that tarball. `protoc` is a build
+  # dependency of the worked example, which compiles a gRPC front door.
+  clippy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-05-01
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just,protoc
+      - run: just lint
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-05-01
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just,protoc
+      - run: just unit
+      # Doctests are not covered by `--all-targets`, so they are a separate run.
+      - run: just doc-test
+
+  # The other half of the vendored-versus-system choice. Linking a system
+  # libhwloc is what packagers and reproducible builds need, and it is not the
+  # default, so nothing else would notice it breaking. It is also how macOS gets
+  # covered: a stock runner has no autotools for the vendored build, and this
+  # path needs none.
+  system-hwloc:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-05-01
+      # libhwloc.pc asks the linker for -ludev, and Ubuntu's libhwloc-dev
+      # depends only on the libudev1 runtime. The .so a link needs is in
+      # libudev-dev, so it has to be named explicitly.
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libhwloc-dev libudev-dev
+      - if: runner.os == 'macOS'
+        run: brew install hwloc
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just,protoc
+      - run: just test-system-hwloc
+
+  # A publish cannot be taken back. These two jobs check what breaks one — a
+  # rustdoc build that fails the way docs.rs would, and a manifest crates.io
+  # would reject — on every push rather than at the tag.
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-05-01
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just,protoc
+      - run: just doc
+
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-05-01
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just,protoc
+      - run: just package
+
+  deny:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-05-01
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just,cargo-deny
+      - run: just deny
+
+  simulation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-05-01
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just,cargo-llvm-cov@0.8.7,protoc
+      - run: just sim
+      - run: just coverage
+
+  # The scheduler slab indexes without bounds checks; this is what checks the
+  # invariant it relies on.
+  undefined-behaviour:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-05-01
+          components: miri,rust-src
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
+      - run: just miri
+
+  nightly:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-05-01
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just,cargo-mutants,protoc
+      - run: just mutants

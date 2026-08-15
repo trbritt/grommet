@@ -1,0 +1,45 @@
+[package]
+name = "grommet-topology"
+description = "Hardware topology discovery and placement planning for grommet"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+exclude.workspace = true
+documentation = "https://docs.rs/grommet-topology"
+keywords = ["hwloc", "numa", "topology", "affinity", "thread-per-core"]
+categories = ["hardware-support", "concurrency", "os"]
+
+[lints.rust]
+unexpected_cfgs = { level = "deny", check-cfg = ["cfg(coverage)"] }
+
+[dependencies]
+# The API floor is hwloc 2.8 (2022, packaged by every current distribution).
+# It is what unlocks the cpukinds ranking for hybrid parts, without demanding a
+# libhwloc newer than a stable server image is likely to carry.
+hwlocality = { version = "1.0.0-alpha.12", features = ["hwloc-2_8_0"] }
+
+[features]
+# Building libhwloc from source is the default because linking a system one is
+# the less reliable path: `pkg-config` finds nothing on a stock macOS install,
+# and distribution packages lag the 2.8 API floor. A default that fails to
+# configure on a developer laptop is not a default.
+#
+# The cost is real and worth stating: the build fetches the hwloc release over
+# the network and needs a C toolchain plus autotools, so it does not work
+# air-gapped. Turn it off with `default-features = false` to link the system
+# library instead — appropriate for distribution packaging, reproducible builds,
+# and any environment where the fetch is unacceptable.
+default = ["vendored"]
+
+vendored = ["hwlocality/vendored"]
+
+# docs.rs has no network during the build, so the vendored libhwloc cannot be
+# compiled there. Documenting against a system library is what makes the docs
+# build at all.
+[package.metadata.docs.rs]
+no-default-features = true

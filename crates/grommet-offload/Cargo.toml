@@ -1,0 +1,38 @@
+[package]
+name = "grommet-offload"
+description = "Pinned Rayon offload pool for grommet shards"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+exclude.workspace = true
+documentation = "https://docs.rs/grommet-offload"
+keywords = ["rayon", "offload", "thread-pool", "numa", "thread-per-core"]
+categories = ["concurrency", "asynchronous", "hardware-support"]
+
+[lints.rust]
+unexpected_cfgs = { level = "deny", check-cfg = ["cfg(coverage)"] }
+
+[dependencies]
+rayon = "1"
+tokio = { version = "1", features = ["sync"] }
+grommet = { workspace = true }
+
+[features]
+default = ["vendored"]
+
+# Build libhwloc from source. See `grommet-topology` for why that is the
+# default and what it costs.
+vendored = ["grommet/vendored"]
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "sync", "macros", "time"] }
+
+# See `grommet-topology`: the vendored libhwloc build needs network access,
+# which a docs.rs build does not have.
+[package.metadata.docs.rs]
+no-default-features = true

@@ -1,0 +1,18 @@
+[package]
+name = "grommet-macros"
+description = "Invariant and testcase macros with zero production abstraction cost"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+exclude.workspace = true
+documentation = "https://docs.rs/grommet-macros"
+keywords = ["assert", "invariant", "macros", "coverage", "no-std"]
+categories = ["development-tools::debugging", "no-std", "rust-patterns"]
+
+[lints.rust]
+unexpected_cfgs = { level = "deny", check-cfg = ["cfg(sim)", "cfg(fault_injection)", "cfg(coverage)"] }

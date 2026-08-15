@@ -1,0 +1,5 @@
+# These become hard architectural bans as the clock/runtime seam lands. They
+# are deliberately listed now so new ambient calls cannot spread unnoticed.
+disallowed-methods = [
+  { path = "std::time::SystemTime::now", reason = "use the production Clock adapter" },
+]

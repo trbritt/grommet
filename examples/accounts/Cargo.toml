@@ -1,0 +1,82 @@
+[package]
+name = "accounts"
+description = "A worked example: an account service built on grommet"
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[lints.rust]
+unexpected_cfgs = { level = "deny", check-cfg = ["cfg(sim)", "cfg(fault_injection)", "cfg(coverage)"] }
+
+[lib]
+name = "accounts"
+path = "src/lib.rs"
+
+[[bin]]
+name = "accounts"
+path = "src/main.rs"
+
+[dependencies]
+ahash = "0.8"
+thiserror = "2"
+ulid = { version = "1", features = ["std"] }
+grommet = { workspace = true }
+grommet-offload = { workspace = true }
+grommet-testkit = { workspace = true }
+
+# Front door
+axum = "0.8"
+futures = "0.3"
+hyper = { version = "1", features = ["client", "server", "http1", "http2"] }
+hyper-util = { version = "0.1", features = ["tokio", "client", "server", "service", "http1", "http2"] }
+prost = "0.14"
+serde = { version = "1", features = ["derive"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "sync", "time", "net", "io-util"] }
+tonic = "0.14"
+tonic-prost = "0.14"
+tower = "0.5"
+turmoil = { version = "0.7", optional = true }
+
+# Production adapters
+deadpool-postgres = "0.14"
+deadpool-redis = "0.18"
+redis = { version = "0.27", default-features = false }
+tokio-postgres = "0.7"
+
+bolero-generator = { version = "0.13", default-features = false, optional = true }
+
+[build-dependencies]
+tonic-prost-build = "0.14"
+
+[features]
+# Bolero generators are on by default here: this crate exists to be tested.
+default = ["gen", "vendored"]
+gen = ["dep:bolero-generator"]
+sim = ["dep:turmoil"]
+
+# Build libhwloc from source. See `grommet-topology` for why that is the
+# default and what it costs.
+vendored = ["grommet/vendored", "grommet-offload/vendored", "grommet-testkit/vendored"]
+
+[dev-dependencies]
+bolero = "0.13"
+criterion = { version = "0.7", features = ["async_tokio"] }
+grommet-core = { workspace = true }
+bolero-generator = { version = "0.13", default-features = false }
+bytes = "1"
+http-body-util = "0.1"
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt", "sync", "test-util", "time"] }
+
+[[test]]
+name = "net_sim"
+path = "tests/net_sim.rs"
+required-features = ["sim"]
+
+[[bench]]
+name = "service"
+harness = false
+test = false
