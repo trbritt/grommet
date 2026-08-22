@@ -11,11 +11,11 @@ use accounts::sim::SimWorld;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use futures::stream::{FuturesUnordered, StreamExt};
 use grommet::metrics::ShardStats;
-use grommet::{ManualClock, Router, ShardConfig, mix, shard};
+use grommet::{Clock, ManualClock, Router, ShardConfig, SystemClock, mix, shard};
 use grommet_core::{Admit, Completion, Config, Disposition, Scheduler};
 use std::hint::black_box;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 type AccountRouter = Router<AccountCall, ManualClock>;
 
@@ -138,6 +138,83 @@ impl Drop for Harness {
     }
 }
 
+/// The producer side of submission: what a front door pays to hand work over.
+///
+/// A front door that already holds several requests — a parsed pipeline, a
+/// batch polled off a consumer — should not pay per-item overhead to pass them
+/// on. This measures the same work submitted one call at a time against one
+/// batched call, with the drain kept outside the timed region so what is
+/// measured is submission rather than the mailbox emptying.
+///
+/// Both clocks are measured, because the difference between them is the
+/// point. A batch reads the clock once instead of once per item, and what that
+/// is worth depends entirely on what a reading costs: `ManualClock` is an
+/// atomic load, while `SystemClock` — the production default — is
+/// `Instant::elapsed`. Measuring only the cheap one would understate what a
+/// real front door saves.
+fn submission(c: &mut Criterion) {
+    const BATCH: usize = 64;
+
+    fn requests(count: usize) -> Vec<Request> {
+        (0..count)
+            .map(|index| Request {
+                req_id: RequestId::from(index as u128 + 1),
+                account: index as u64,
+                op: Op::Balance,
+            })
+            .collect()
+    }
+
+    /// Time `iterations` rounds of handing one batch over, draining between
+    /// rounds so a full mailbox never becomes the thing being measured.
+    fn timed<C, F>(clock: C, iterations: u64, mut submit: F) -> Duration
+    where
+        C: Clock,
+        F: FnMut(&Router<Request, C>, Vec<Request>),
+    {
+        // Deep enough to take a whole batch, so neither variant measures
+        // backpressure instead of submission.
+        let (sender, mut inbox) = grommet::channel(BATCH * 2);
+        let router = Router::<Request, C>::new(vec![sender], clock);
+        let mut elapsed = Duration::ZERO;
+        for _ in 0..iterations {
+            let batch = requests(BATCH);
+            let start = Instant::now();
+            submit(&router, batch);
+            elapsed += start.elapsed();
+            while inbox.try_recv().is_ok() {}
+        }
+        elapsed
+    }
+
+    fn one_at_a_time<C: Clock>(router: &Router<Request, C>, batch: Vec<Request>) {
+        for request in batch {
+            let _ = black_box(router.try_submit(request));
+        }
+    }
+
+    fn all_at_once<C: Clock>(router: &Router<Request, C>, batch: Vec<Request>) {
+        let _ = black_box(router.try_submit_batch(batch));
+    }
+
+    let mut group = c.benchmark_group("router");
+    group.throughput(Throughput::Elements(BATCH as u64));
+
+    group.bench_function(BenchmarkId::new("submit/64_single", "manual"), |b| {
+        b.iter_custom(|n| timed(ManualClock::new(), n, one_at_a_time));
+    });
+    group.bench_function(BenchmarkId::new("submit/64_batched", "manual"), |b| {
+        b.iter_custom(|n| timed(ManualClock::new(), n, all_at_once));
+    });
+    group.bench_function(BenchmarkId::new("submit/64_single", "system"), |b| {
+        b.iter_custom(|n| timed(SystemClock::new(), n, one_at_a_time));
+    });
+    group.bench_function(BenchmarkId::new("submit/64_batched", "system"), |b| {
+        b.iter_custom(|n| timed(SystemClock::new(), n, all_at_once));
+    });
+    group.finish();
+}
+
 fn reactor(c: &mut Criterion) {
     const CALLS: u64 = 64;
     let mut group = c.benchmark_group("reactor");
@@ -191,5 +268,5 @@ fn reactor(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, domain, scheduler, reactor);
+criterion_group!(benches, domain, scheduler, submission, reactor);
 criterion_main!(benches);
