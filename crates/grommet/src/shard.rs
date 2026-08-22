@@ -38,6 +38,21 @@ pub struct ShardConfig<const CLASSES: usize = 2> {
     /// This amortizes cross-thread wakeups, which dominate at high rates, while
     /// bounding how long an arrival burst can delay completion harvesting.
     pub admit_batch: usize,
+    /// Maximum completions harvested after one awaited completion.
+    ///
+    /// The mirror of [`admit_batch`], and for the same reason: completions
+    /// arrive in the same numbers admissions do, and taking each one through a
+    /// full reactor turn spends more on the turn than on the completion. A
+    /// batch shares one clock reading and one pass of the loop's bookkeeping
+    /// across everything already finished.
+    ///
+    /// It is a cap, not a target — harvesting stops as soon as nothing else is
+    /// ready. The cap is what keeps a steady stream of completions from
+    /// starving the other arms of the loop, exactly as `admit_batch` keeps a
+    /// producer from starving them.
+    ///
+    /// [`admit_batch`]: ShardConfig::admit_batch
+    pub complete_batch: usize,
     /// How often gauges are published and eviction is swept.
     pub tick: Duration,
     pub panic_policy: PanicPolicy,
@@ -58,6 +73,7 @@ impl<const CLASSES: usize> ShardConfig<CLASSES> {
         Self {
             scheduler: grommet_core::Config::new(max_inflight),
             admit_batch: 64,
+            complete_batch: 64,
             tick: Duration::from_secs(1),
             panic_policy: PanicPolicy::default(),
             coalesce_duplicates: false,
@@ -262,35 +278,56 @@ pub async fn run<P, C, const CLASSES: usize>(
 
             // Guarded because `FuturesUnordered::next` resolves to `None`
             // immediately when empty, which would busy-spin the loop.
-            Some(outcome) = outstanding.next(), if !outstanding.is_empty() => {
+            Some(first) = outstanding.next(), if !outstanding.is_empty() => {
                 let at = clock.now();
-                match outcome {
-                    Outcome::Ran {
-                        completion,
-                        request_id,
-                        panicked,
-                        fallout
-                    } => {
-                        hot.bump(&hot.completed);
-                        if let Some(fallout) = fallout {
-                            hot.bump(&hot.failed);
-                            if fallout.is_in_doubt() {
-                                hot.bump(&hot.in_doubt);
+                let mut harvested = 0;
+                let mut outcome = Some(first);
+                // One clock reading and one loop turn for everything that has
+                // already finished. `at` is shared deliberately: the scheduler
+                // needs its timestamps monotonic, not individually precise, and
+                // a batch spans microseconds against an eviction window of
+                // seconds — the same argument that carries `now` across turns.
+                while let Some(current) = outcome {
+                    match current {
+                        Outcome::Ran {
+                            completion,
+                            request_id,
+                            panicked,
+                            fallout
+                        } => {
+                            hot.bump(&hot.completed);
+                            if let Some(fallout) = fallout {
+                                hot.bump(&hot.failed);
+                                if fallout.is_in_doubt() {
+                                    hot.bump(&hot.in_doubt);
+                                }
                             }
-                        }
-                        if panicked {
-                            hot.bump(&hot.panicked);
-                            if cfg.panic_policy == PanicPolicy::Abort {
-                                stats.publish(&hot, &book.snapshot());
-                                std::process::abort();
+                            if panicked {
+                                hot.bump(&hot.panicked);
+                                if cfg.panic_policy == PanicPolicy::Abort {
+                                    stats.publish(&hot, &book.snapshot());
+                                    std::process::abort();
+                                }
                             }
+                            if let Some(id) = request_id {
+                                live.remove(&(completion.key, id));
+                            }
+                            book.complete(completion, at);
                         }
-                        if let Some(id) = request_id {
-                            live.remove(&(completion.key, id));
-                        }
-                        book.complete(completion, at);
+                        Outcome::Flushed(key) => book.finish_evict(key, at),
                     }
-                    Outcome::Flushed(key) => book.finish_evict(key, at),
+
+                    harvested += 1;
+                    if harvested >= cfg.complete_batch.max(1) {
+                        break;
+                    }
+                    // Take whatever else has already resolved, without
+                    // suspending. Polling with a throwaway waker cannot lose a
+                    // wakeup here: a future that finishes afterwards enqueues
+                    // itself on the set's own ready list, and the next real
+                    // poll of this arm — which happens on the very next turn,
+                    // before the loop can ever suspend — drains it.
+                    outcome = outstanding.next().now_or_never().flatten();
                 }
                 now = clock.now();
                 hot.add(&hot.busy_nanos, now.saturating_sub(at).as_nanos() as u64);
@@ -631,6 +668,69 @@ mod tests {
             vec![(3, None)],
             "an expired item must release its id rather than blackhole the key's retries"
         );
+    }
+
+    /// Harvesting completions in a batch must not change what the shard did,
+    /// only how many turns it took to do it. The batch is drained with a
+    /// throwaway waker, so the failure this guards against is a completion
+    /// that is polled, resolves, and is then dropped on the floor — which
+    /// would show up as work that never finished.
+    #[tokio::test(start_paused = true)]
+    async fn the_completion_batch_size_changes_no_observable_behaviour() {
+        async fn run_with(complete_batch: usize) -> (Vec<(u64, Option<u64>)>, u64) {
+            let processor = Recorder::new();
+            let log = processor.log.clone();
+            let mut cfg = config();
+            cfg.complete_batch = complete_batch;
+            // Enough concurrency that completions genuinely arrive together;
+            // with a budget of one there would never be a second to harvest.
+            cfg.scheduler.max_inflight = [16, 16];
+
+            let stats = drive(processor, cfg, |router, _clock| async move {
+                for round in 0..8u64 {
+                    for key in 0..12u64 {
+                        router.submit(Item::new(key)).await.unwrap();
+                    }
+                    let _ = round;
+                }
+            })
+            .await;
+            let processed = log.borrow().processed.clone();
+            (processed, stats.completed.load(std::sync::atomic::Ordering::Relaxed))
+        }
+
+        // One completion per turn, the pre-batching behaviour, as the reference.
+        let (reference, reference_completed) = run_with(1).await;
+        assert_eq!(reference.len(), 96, "every submitted item has to be processed");
+        assert_eq!(reference_completed, 96);
+
+        for batch in [2, 7, 64, 4096] {
+            let (processed, completed) = run_with(batch).await;
+            assert_eq!(
+                processed, reference,
+                "a completion batch of {batch} changed what the shard processed"
+            );
+            assert_eq!(completed, reference_completed, "batch {batch} lost a completion");
+        }
+    }
+
+    /// A batch of zero would mean harvesting nothing, which cannot make
+    /// progress. It is clamped rather than rejected, because the value comes
+    /// from a config struct a caller can build by hand.
+    #[tokio::test(start_paused = true)]
+    async fn a_zero_completion_batch_still_makes_progress() {
+        let processor = Recorder::new();
+        let log = processor.log.clone();
+        let mut cfg = config();
+        cfg.complete_batch = 0;
+
+        drive(processor, cfg, |router, _clock| async move {
+            for key in 0..4u64 {
+                router.submit(Item::new(key)).await.unwrap();
+            }
+        })
+        .await;
+        assert_eq!(log.borrow().processed.len(), 4);
     }
 
     #[tokio::test(start_paused = true)]
