@@ -120,9 +120,7 @@ static NEXT_WHEEL_ID: AtomicU32 = AtomicU32::new(1);
 
 fn allocate_wheel_id() -> u32 {
     NEXT_WHEEL_ID
-        .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-            current.checked_add(1)
-        })
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| current.checked_add(1))
         .expect("the process constructed more than u32::MAX - 1 timer wheels")
 }
 
@@ -173,9 +171,7 @@ impl TimerId {
 
 impl fmt::Debug for TimerId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_tuple("TimerId")
-            .field(&format_args!("{:#034x}", self.get()))
-            .finish()
+        f.debug_tuple("TimerId").field(&format_args!("{:#034x}", self.get())).finish()
     }
 }
 
@@ -220,9 +216,7 @@ impl<T> InsertError<T> {
 
 impl<T> fmt::Debug for InsertError<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("InsertError")
-            .field("kind", &self.kind)
-            .finish_non_exhaustive()
+        f.debug_struct("InsertError").field("kind", &self.kind).finish_non_exhaustive()
     }
 }
 
@@ -321,23 +315,13 @@ impl<T, const SHIFT: u32> Wheel<T, SHIFT> {
     /// this first-touches its metadata before the hot loop starts.  Construct
     /// the wheel on the CPU and NUMA node that will own it.
     pub fn with_capacity_at_tick(capacity: usize, now: u64) -> Self {
-        let _ = Self::VALID_SHIFT;
-        assert!(
-            capacity <= NIL as usize,
-            "timer-wheel capacity exceeds u32 indexing"
-        );
-        assert!(
-            now <= MAX_TICK,
-            "u64::MAX is reserved as the empty-event sentinel"
-        );
+        const { Self::VALID_SHIFT };
+        assert!(capacity <= NIL as usize, "timer-wheel capacity exceeds u32 indexing");
+        assert!(now <= MAX_TICK, "u64::MAX is reserved as the empty-event sentinel");
 
         let mut entries = Vec::with_capacity(capacity);
         for index in 0..capacity {
-            let next = if index + 1 < capacity {
-                (index + 1) as u32
-            } else {
-                NIL
-            };
+            let next = if index + 1 < capacity { (index + 1) as u32 } else { NIL };
             entries.push(Entry {
                 deadline: 0,
                 generation: 0,
@@ -381,16 +365,13 @@ impl<T, const SHIFT: u32> Wheel<T, SHIFT> {
     pub const fn max_delay() -> Duration {
         assert!(SHIFT <= MAX_SHIFT, "timer-wheel SHIFT must be in 0..=29");
         let nanos = (MAX_DELAY_TICKS as u128) << SHIFT;
-        Duration::new(
-            (nanos / 1_000_000_000) as u64,
-            (nanos % 1_000_000_000) as u32,
-        )
+        Duration::new((nanos / 1_000_000_000) as u64, (nanos % 1_000_000_000) as u32)
     }
 
     /// Convert current time to ticks by rounding down.
     #[inline]
     pub fn duration_to_tick_floor(at: Duration) -> Option<u64> {
-        let _ = Self::VALID_SHIFT;
+        const { Self::VALID_SHIFT };
         let nanos = u128::from(at.as_secs()) * 1_000_000_000 + u128::from(at.subsec_nanos());
         let ticks = nanos >> SHIFT;
         (ticks <= u128::from(MAX_TICK)).then_some(ticks as u64)
@@ -399,7 +380,7 @@ impl<T, const SHIFT: u32> Wheel<T, SHIFT> {
     /// Convert a deadline to ticks by rounding up.
     #[inline]
     pub fn duration_to_tick_ceil(at: Duration) -> Option<u64> {
-        let _ = Self::VALID_SHIFT;
+        const { Self::VALID_SHIFT };
         let nanos = u128::from(at.as_secs()) * 1_000_000_000 + u128::from(at.subsec_nanos());
         let mask = (1u128 << SHIFT) - 1;
         let ticks = (nanos >> SHIFT) + u128::from(nanos & mask != 0);
@@ -408,16 +389,10 @@ impl<T, const SHIFT: u32> Wheel<T, SHIFT> {
 
     /// Convert an absolute tick to `Duration`.
     pub fn tick_to_duration(tick: u64) -> Duration {
-        let _ = Self::VALID_SHIFT;
-        assert!(
-            tick <= MAX_TICK,
-            "u64::MAX is not a representable timer tick"
-        );
+        const { Self::VALID_SHIFT };
+        assert!(tick <= MAX_TICK, "u64::MAX is not a representable timer tick");
         let nanos = u128::from(tick) << SHIFT;
-        Duration::new(
-            (nanos / 1_000_000_000) as u64,
-            (nanos % 1_000_000_000) as u32,
-        )
+        Duration::new((nanos / 1_000_000_000) as u64, (nanos % 1_000_000_000) as u32)
     }
 
     /// Current cursor position.
@@ -540,11 +515,7 @@ impl<T, const SHIFT: u32> Wheel<T, SHIFT> {
         let index = self.live_index(id)?;
         let (level, slot, singleton) = {
             let entry = &self.entries[index as usize];
-            (
-                entry.level as usize,
-                entry.slot as usize,
-                entry.prev == NIL && entry.next == NIL,
-            )
+            (entry.level as usize, entry.slot as usize, entry.prev == NIL && entry.next == NIL)
         };
         let removed_earliest = singleton && self.slot_wakeup(level, slot) == self.next_event;
 
@@ -573,11 +544,7 @@ impl<T, const SHIFT: u32> Wheel<T, SHIFT> {
         let index = self.live_index(id).ok_or(RescheduleError::StaleId)?;
         let (old_level, old_slot, singleton) = {
             let entry = &self.entries[index as usize];
-            (
-                entry.level as usize,
-                entry.slot as usize,
-                entry.prev == NIL && entry.next == NIL,
-            )
+            (entry.level as usize, entry.slot as usize, entry.prev == NIL && entry.next == NIL)
         };
         let removed_earliest =
             singleton && self.slot_wakeup(old_level, old_slot) == self.next_event;
@@ -721,7 +688,7 @@ impl<T, const SHIFT: u32> Wheel<T, SHIFT> {
         } else {
             rotation - within_rotation + slot_start
         };
-        self.cursor.checked_add(distance).unwrap_or(u64::MAX)
+        self.cursor.saturating_add(distance)
     }
 
     fn compute_next_event(&self) -> Option<u64> {
@@ -806,12 +773,7 @@ impl<T, const SHIFT: u32> Wheel<T, SHIFT> {
     fn unlink(&mut self, index: u32) {
         let (level, slot, prev, next) = {
             let entry = &self.entries[index as usize];
-            (
-                entry.level as usize,
-                entry.slot as usize,
-                entry.prev,
-                entry.next,
-            )
+            (entry.level as usize, entry.slot as usize, entry.prev, entry.next)
         };
 
         if prev == NIL {
@@ -956,7 +918,7 @@ impl<T, const SHIFT: u32> Wheel<T, SHIFT> {
         if retired != self.retired {
             return Err("retired counter disagrees with retired entries");
         }
-        if free + live + retired != self.entries.len() || seen.iter().any(|state| *state == 0) {
+        if free + live + retired != self.entries.len() || seen.contains(&0) {
             return Err("the slab contains an unreachable entry");
         }
         if self.available() != free {
@@ -995,10 +957,7 @@ mod tests {
         assert_eq!(Us::granularity(), Duration::from_nanos(1_024));
         assert!(Us::max_delay() > Duration::from_secs(9 * 365 * 86_400));
         assert!(Us::max_delay() < Duration::from_secs(10 * 365 * 86_400));
-        assert_eq!(
-            std::mem::size_of::<Option<TimerId>>(),
-            std::mem::size_of::<TimerId>()
-        );
+        assert_eq!(std::mem::size_of::<Option<TimerId>>(), std::mem::size_of::<TimerId>());
         assert_eq!(std::mem::size_of::<TimerId>(), 16);
     }
 
@@ -1006,38 +965,19 @@ mod tests {
     fn duration_deadlines_round_up_and_current_time_rounds_down() {
         assert_eq!(Us::duration_to_tick_ceil(Duration::from_nanos(0)), Some(0));
         assert_eq!(Us::duration_to_tick_ceil(Duration::from_nanos(1)), Some(1));
-        assert_eq!(
-            Us::duration_to_tick_ceil(Duration::from_nanos(1_024)),
-            Some(1)
-        );
-        assert_eq!(
-            Us::duration_to_tick_ceil(Duration::from_nanos(1_025)),
-            Some(2)
-        );
-        assert_eq!(
-            Us::duration_to_tick_floor(Duration::from_nanos(1_023)),
-            Some(0)
-        );
-        assert_eq!(
-            Us::duration_to_tick_floor(Duration::from_nanos(1_024)),
-            Some(1)
-        );
+        assert_eq!(Us::duration_to_tick_ceil(Duration::from_nanos(1_024)), Some(1));
+        assert_eq!(Us::duration_to_tick_ceil(Duration::from_nanos(1_025)), Some(2));
+        assert_eq!(Us::duration_to_tick_floor(Duration::from_nanos(1_023)), Some(0));
+        assert_eq!(Us::duration_to_tick_floor(Duration::from_nanos(1_024)), Some(1));
 
         let mut wheel = Us::with_capacity(1);
         wheel
             .try_insert_duration(Duration::from_nanos(1_500), 7)
             .expect("within capacity and horizon");
         let mut due = Vec::with_capacity(1);
-        wheel
-            .advance_duration(Duration::from_nanos(2_047), &mut due)
-            .unwrap();
-        assert!(
-            due.is_empty(),
-            "the 1,500ns deadline must not fire at tick one"
-        );
-        wheel
-            .advance_duration(Duration::from_nanos(2_048), &mut due)
-            .unwrap();
+        wheel.advance_duration(Duration::from_nanos(2_047), &mut due).unwrap();
+        assert!(due.is_empty(), "the 1,500ns deadline must not fire at tick one");
+        wheel.advance_duration(Duration::from_nanos(2_048), &mut due).unwrap();
         assert_eq!(due, [7]);
     }
 
@@ -1046,10 +986,7 @@ mod tests {
         let mut wheel = Ns::with_capacity(4);
         wheel.try_insert_at(100, 1).unwrap();
         assert!(!wheel.is_due_at(63));
-        assert!(
-            wheel.is_due_at(64),
-            "the level-one bucket needs cascading before the deadline"
-        );
+        assert!(wheel.is_due_at(64), "the level-one bucket needs cascading before the deadline");
         assert_eq!(drain(&mut wheel, 50), []);
         assert_eq!(drain(&mut wheel, 99), []);
         assert!(wheel.is_due_at(100));
@@ -1080,10 +1017,7 @@ mod tests {
         let local = right.try_insert_at(10, 2).unwrap();
 
         assert_eq!(right.cancel(foreign), None);
-        assert_eq!(
-            right.reschedule_at(foreign, 20),
-            Err(RescheduleError::StaleId)
-        );
+        assert_eq!(right.reschedule_at(foreign, 20), Err(RescheduleError::StaleId));
         assert!(right.contains(local));
     }
 
@@ -1091,9 +1025,8 @@ mod tests {
     fn cancellation_is_idempotent_and_unlinks_every_list_position() {
         for victim in 0..3usize {
             let mut wheel = Ns::with_capacity(3);
-            let ids: Vec<_> = (0..3u64)
-                .map(|token| wheel.try_insert_at(100, token).unwrap())
-                .collect();
+            let ids: Vec<_> =
+                (0..3u64).map(|token| wheel.try_insert_at(100, token).unwrap()).collect();
             assert_eq!(wheel.cancel(ids[victim]), Some(victim as u64));
             assert_eq!(wheel.cancel(ids[victim]), None);
             assert_eq!(wheel.check_invariants(), Ok(()));
@@ -1179,11 +1112,7 @@ mod tests {
         let mut wheel = Ns::with_capacity(LEVELS);
         let mut deadlines = Vec::new();
         for level in 0..LEVELS {
-            let deadline = if level == 0 {
-                1
-            } else {
-                (1u64 << (level as u32 * SLOT_BITS)) + 3
-            };
+            let deadline = if level == 0 { 1 } else { (1u64 << (level as u32 * SLOT_BITS)) + 3 };
             deadlines.push(deadline);
             wheel.try_insert_at(deadline, deadline).unwrap();
         }
@@ -1232,10 +1161,7 @@ mod tests {
         assert_eq!(wheel.retired(), 1);
         assert_eq!(wheel.available(), 0);
         assert_eq!(wheel.cancel(id), None);
-        assert_eq!(
-            wheel.try_insert_at(2, 2).unwrap_err().kind(),
-            InsertErrorKind::Full
-        );
+        assert_eq!(wheel.try_insert_at(2, 2).unwrap_err().kind(), InsertErrorKind::Full);
         assert_eq!(wheel.check_invariants(), Ok(()));
     }
 
@@ -1267,10 +1193,7 @@ mod tests {
     #[test]
     fn malformed_timer_ids_are_rejected() {
         assert!(TimerId::from_raw(0).is_none());
-        assert!(
-            TimerId::from_raw(1).is_none(),
-            "wheel and generation fields are zero"
-        );
+        assert!(TimerId::from_raw(1).is_none(), "wheel and generation fields are zero");
 
         let mut wheel = Ns::with_capacity(1);
         let id = wheel.try_insert_at(1, 1).unwrap();
@@ -1289,13 +1212,8 @@ mod tests {
     }
 
     fn remove_model(model: &mut BTreeMap<u64, Vec<u64>>, deadline: u64, token: u64) {
-        let bucket = model
-            .get_mut(&deadline)
-            .expect("model contains live deadline");
-        let position = bucket
-            .iter()
-            .position(|held| *held == token)
-            .expect("model contains token");
+        let bucket = model.get_mut(&deadline).expect("model contains live deadline");
+        let position = bucket.iter().position(|held| *held == token).expect("model contains token");
         bucket.swap_remove(position);
         if bucket.is_empty() {
             model.remove(&deadline);
@@ -1305,9 +1223,13 @@ mod tests {
     #[test]
     fn randomized_battle_against_an_ordered_reference_model() {
         const CAPACITY: usize = 256;
-        const STEPS: usize = 30_000;
+        // Miri interprets every slot visit, and `check_invariants` walks all of
+        // them each step; the full sweep would run for hours there.
+        const STEPS: usize = if cfg!(miri) { 150 } else { 30_000 };
 
-        for seed in [1, 0x5eed, 0xdead_beef, 0x1234_5678_9abc_def0] {
+        let seeds: &[u64] =
+            if cfg!(miri) { &[1] } else { &[1, 0x5eed, 0xdead_beef, 0x1234_5678_9abc_def0] };
+        for &seed in seeds {
             let mut rng = Rng(seed);
             let mut wheel = Ns::with_capacity(CAPACITY);
             let mut model: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
@@ -1404,11 +1326,7 @@ mod tests {
                 }
 
                 assert_eq!(wheel.len(), live.len(), "step {step}, seed {seed:#x}");
-                assert_eq!(
-                    wheel.check_invariants(),
-                    Ok(()),
-                    "step {step}, seed {seed:#x}"
-                );
+                assert_eq!(wheel.check_invariants(), Ok(()), "step {step}, seed {seed:#x}");
                 match model.keys().next().copied() {
                     Some(earliest) => {
                         assert!(wheel.next_wakeup_tick().unwrap() <= earliest);
