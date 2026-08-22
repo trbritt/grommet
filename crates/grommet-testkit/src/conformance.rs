@@ -36,6 +36,12 @@ pub struct SweepReport {
     pub worst_dispatch_gap: usize,
     /// Peak simultaneously queued items, for sizing `Config::queue_reserve`.
     pub queue_capacity: usize,
+    /// The largest eviction worklist seen at any point in the sweep. Idle
+    /// tracking is per resident key rather than per completion, so this is
+    /// bounded by the key count no matter how much throughput passes
+    /// through — a value that scales with `steps` instead means the
+    /// scheduler is accumulating one entry per operation.
+    pub peak_eviction_backlog: usize,
 }
 
 /// An independent model of what the scheduler owes each key, so the sweep can
@@ -99,7 +105,7 @@ pub fn scheduler_sweep<const CLASSES: usize>(cfg: Config<CLASSES>, spec: SweepSp
                     let head = *entry.queued.front().expect("just pushed");
                     entry.ready_at = Some((head, dispatched_per_class[head as usize]));
                 }
-                book.admit(Admit { key, class, expires_at: None, payload: roll }, now);
+                book.admit(Admit { key, class, expires_at: None, payload: roll });
                 report.admitted += 1;
             }
             // Dispatch
@@ -140,6 +146,20 @@ pub fn scheduler_sweep<const CLASSES: usize>(cfg: Config<CLASSES>, spec: SweepSp
         }
 
         assert_eq!(book.check_invariants(), Ok(()), "invariant broke at step {step}");
+
+        // Idle tracking is the one structure that grew per operation rather
+        // than per key, so it is measured on every step rather than sampled:
+        // a leak here is silent, costs nothing until the shard has been up
+        // for hours, and is exactly what a sweep is placed to catch.
+        let live = book.snapshot();
+        assert!(
+            live.eviction_backlog <= live.resident,
+            "step {step}: {} keys awaiting eviction against {} resident — \
+             idle tracking is not bounded by the key count",
+            live.eviction_backlog,
+            live.resident,
+        );
+        report.peak_eviction_backlog = report.peak_eviction_backlog.max(live.eviction_backlog);
     }
 
     // A ring holds each key at most once, so a key can wait behind at most one
@@ -302,6 +322,33 @@ mod tests {
         assert!(
             report.worst_dispatch_gap > 0,
             "a sweep this long must make some key wait, or it is proving nothing"
+        );
+    }
+
+    /// Throughput must not accumulate. Sixteen keys are cycled tens of
+    /// thousands of times with an eviction window nothing ever reaches, so
+    /// every completion that goes idle has to reuse the same entry. A
+    /// structure that recorded one candidate per completion would end this
+    /// run holding `dispatched` of them; this one is capped at the key count.
+    #[test]
+    fn idle_tracking_is_bounded_by_keys_rather_than_by_throughput() {
+        const KEYS: u64 = 16;
+        let mut cfg = Config::<2>::new([4, 2]);
+        cfg.max_pending = 256;
+        // Long enough that no key is ever old enough to age out mid-run, so
+        // the worklist is only ever added to — the leaking case.
+        cfg.evict_after = std::time::Duration::from_secs(3600);
+        let report = scheduler_sweep(cfg, SweepSpec { keys: KEYS, steps: 50_000, seed: 11 });
+
+        // Nothing ages out, so the only evictions are the shutdown flush: one
+        // per key, however long the run was.
+        assert_eq!(report.evicted, KEYS as usize, "only the shutdown flush should evict");
+        assert!(report.dispatched > 10_000, "the run has to be long enough to expose growth");
+        assert!(
+            report.peak_eviction_backlog <= KEYS as usize,
+            "idle tracking reached {} entries against {KEYS} keys and {} dispatches",
+            report.peak_eviction_backlog,
+            report.dispatched,
         );
     }
 

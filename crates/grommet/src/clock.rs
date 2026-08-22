@@ -81,10 +81,22 @@ mod tests {
     }
 
     #[test]
-    fn the_system_clock_is_monotonic_from_its_origin() {
+    fn the_system_clock_is_monotonic_and_actually_advances_from_its_origin() {
         let clock = SystemClock::default();
         let first = clock.now();
         let second = clock.now();
-        assert!(second >= first);
+        assert!(second >= first, "a clock that went backwards would break every deadline");
+
+        // Monotonicity alone is satisfied by a clock stuck at zero, which is
+        // indistinguishable from a working one until a deadline has to fire.
+        // Spin rather than sleep: this needs a few nanoseconds, not a timer.
+        let start = std::time::Instant::now();
+        while clock.now() == Duration::ZERO {
+            assert!(
+                start.elapsed() < Duration::from_secs(5),
+                "the system clock never left its origin"
+            );
+            std::hint::spin_loop();
+        }
     }
 }

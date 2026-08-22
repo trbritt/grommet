@@ -39,6 +39,7 @@ use ahash::AHashMap;
 #[cfg(not(coverage))]
 use grommet_macros::always;
 use std::collections::VecDeque;
+use std::collections::hash_map::Entry;
 use std::hash::Hash;
 use std::time::Duration;
 
@@ -142,6 +143,11 @@ pub struct Snapshot<const CLASSES: usize = 2> {
     pub pending: usize,
     pub resident: usize,
     pub evicting: usize,
+    /// Resident keys sitting idle, which is exactly the eviction sweep's
+    /// worklist. It is bounded by `resident` by construction; publishing it
+    /// is what makes that a claim the deployment can check rather than one
+    /// the source has to be trusted for.
+    pub eviction_backlog: usize,
     /// High-water mark of simultaneously queued items, in slab entries. The
     /// slab never shrinks, so this is what `Config::queue_reserve` should be
     /// set to for an allocation-free steady state.
@@ -157,6 +163,7 @@ impl<const CLASSES: usize> Default for Snapshot<CLASSES> {
             pending: 0,
             resident: 0,
             evicting: 0,
+            eviction_backlog: 0,
             queue_capacity: 0,
         }
     }
@@ -181,16 +188,40 @@ struct Item<P> {
 /// Per-key bookkeeping. Its size is independent of the work item type, because
 /// queued items live in the shard-wide slab rather than in the slot, which
 /// keeps the key map compact when a shard holds many keys.
-struct Slot<S> {
+struct Slot<K, S> {
     resident: Option<S>,
     queue: List,
     presence: Presence,
-    last_touch: Duration,
+    /// When this key last went idle, which is when its eviction window opens.
+    /// Read only while `presence` is [`Presence::Idle`]; stale otherwise, and
+    /// deliberately not maintained there, because nothing may consult it.
+    idle_since: Duration,
+    /// Neighbours in the shard's idle list, oldest first. Meaningful only
+    /// while `presence` is [`Presence::Idle`], and `None` in every other
+    /// state — a key that is ready, running or flushing is not a candidate.
+    idle_prev: Option<K>,
+    idle_next: Option<K>,
 }
 
-impl<S> Slot<S> {
-    fn cold(now: Duration) -> Self {
-        Self { resident: None, queue: List::default(), presence: Presence::Idle, last_touch: now }
+impl<K, S> Slot<K, S> {
+    /// A slot for a key seen for the first time. It is deliberately *not* on
+    /// the idle list: the caller creates one only to queue work behind it, so
+    /// it leaves `Idle` before the next statement observes it.
+    fn cold() -> Self {
+        Self {
+            resident: None,
+            queue: List::default(),
+            presence: Presence::Idle,
+            idle_since: Duration::ZERO,
+            idle_prev: None,
+            idle_next: None,
+        }
+    }
+
+    /// Take this slot's links, leaving it detached. The caller still owes the
+    /// neighbours their patch, which is what [`Scheduler::idle_patch`] does.
+    fn detach(&mut self) -> (Option<K>, Option<K>) {
+        (self.idle_prev.take(), self.idle_next.take())
     }
 }
 
@@ -198,10 +229,20 @@ impl<S> Slot<S> {
 /// state `S`.
 pub struct Scheduler<K, P, S, const CLASSES: usize = 2> {
     cfg: Config<CLASSES>,
-    keys: AHashMap<K, Slot<S>>,
+    keys: AHashMap<K, Slot<K, S>>,
     slab: Slab<Item<P>>,
     ready: [VecDeque<K>; CLASSES],
-    eviction: VecDeque<(K, Duration)>,
+    /// Oldest and newest key on the idle list, an intrusive doubly-linked list
+    /// threaded through the slots themselves.
+    ///
+    /// Keys join at the tail when they go idle and are unlinked the moment
+    /// they are touched, so the list holds each idle key exactly once and
+    /// nothing else — it is bounded by the resident key count, and a sweep
+    /// walking from the head sees keys in genuine least-recently-used order
+    /// with no stale entries to skip.
+    idle_head: Option<K>,
+    idle_tail: Option<K>,
+    idle: usize,
     expired: VecDeque<(K, P)>,
     inflight: [usize; CLASSES],
     pending: usize,
@@ -218,7 +259,9 @@ where
             keys: AHashMap::new(),
             slab: Slab::with_capacity(cfg.queue_reserve),
             ready: std::array::from_fn(|_| VecDeque::new()),
-            eviction: VecDeque::new(),
+            idle_head: None,
+            idle_tail: None,
+            idle: 0,
             expired: VecDeque::new(),
             inflight: [0; CLASSES],
             pending: 0,
@@ -246,23 +289,41 @@ where
     /// Queue an item behind its key. The caller is responsible for refusing
     /// admission above [`Config::max_pending`]; this is where backpressure is
     /// applied, and the scheduler deliberately does not decide the policy.
-    pub fn admit(&mut self, item: Admit<K, P>, now: Duration) {
+    ///
+    /// Admission takes no clock. A key's eviction window opens when it goes
+    /// idle, not when work arrives for it, so there is no time to record here.
+    pub fn admit(&mut self, item: Admit<K, P>) {
         let Admit { key, class, expires_at, payload } = item;
         debug_assert!((class as usize) < CLASSES, "class {class} is outside 0..{CLASSES}");
         self.pending += 1;
-        let slot = self.keys.entry(key).or_insert_with(|| Slot::cold(now));
-        slot.last_touch = now;
+        // Whether the slot already existed decides whether it is on the idle
+        // list, and the entry answers that without a second lookup.
+        let (slot, resurrected) = match self.keys.entry(key) {
+            Entry::Occupied(entry) => (entry.into_mut(), true),
+            Entry::Vacant(entry) => (entry.insert(Slot::cold()), false),
+        };
         self.slab.push_back(&mut slot.queue, Item { class, expires_at, payload });
         // A key that is in-flight, already ready, or quiescing for eviction
         // keeps its position; only an idle key joins a ring, and its queue was
         // empty, so the item just pushed is the head whose class decides.
+        let mut detached = None;
         let joins = match slot.presence {
             Presence::Idle => {
                 slot.presence = Presence::Ready(class);
+                // An idle key that was already resident is on the idle list
+                // and has just stopped being a candidate. One created a
+                // statement ago never joined it.
+                if resurrected {
+                    detached = Some(slot.detach());
+                }
                 true
             }
             Presence::Ready(_) | Presence::InFlight | Presence::Evicting => false,
         };
+        if let Some((prev, next)) = detached {
+            self.idle -= 1;
+            self.idle_patch(prev, next);
+        }
         if joins {
             self.ready[class as usize].push_back(key);
         }
@@ -301,7 +362,6 @@ where
             match taken {
                 Some(item) => {
                     slot.presence = Presence::InFlight;
-                    slot.last_touch = now;
                     let state = slot.resident.take();
                     self.inflight[index] += 1;
                     return Some(Dispatch { key, class, state, payload: item.payload });
@@ -332,7 +392,6 @@ where
         let slot = self.keys.get_mut(&key).expect("completed key has a slot");
         debug_assert_eq!(slot.presence, Presence::InFlight);
         slot.resident = state.into_option();
-        slot.last_touch = now;
         let target = Self::settle(&self.slab, slot);
         self.place(key, target, now);
     }
@@ -344,10 +403,13 @@ where
     /// race a reload of the same key.
     pub fn evict(&mut self, now: Duration, out: &mut Vec<(K, S)>) {
         for _ in 0..self.cfg.evict_iters {
-            let Some(&(key, touched)) = self.eviction.front() else {
+            // The head is the least recently idled key, so the first one that
+            // is too young ends the sweep: nothing behind it can be older.
+            let Some(key) = self.idle_head else {
                 break;
             };
-            let idle_long_enough = now.saturating_sub(touched) >= self.cfg.evict_after;
+            let since = self.keys.get(&key).expect("a listed key has a slot").idle_since;
+            let idle_long_enough = now.saturating_sub(since) >= self.cfg.evict_after;
             // A quiescing key still occupies a map entry but its state is
             // already being flushed, so it must not count against the cap or a
             // single sweep would evict far past it.
@@ -356,8 +418,8 @@ where
             if !idle_long_enough && !over_capacity {
                 break;
             }
-            self.eviction.pop_front();
-            self.release(key, touched, out);
+            self.idle_unlink_head();
+            self.release(key, out);
         }
     }
 
@@ -370,22 +432,21 @@ where
     /// The keys are quiesced exactly as [`Scheduler::evict`] quiesces them, so
     /// each one still needs its [`Scheduler::finish_evict`].
     pub fn evict_all(&mut self, out: &mut Vec<(K, S)>) {
-        while let Some((key, touched)) = self.eviction.pop_front() {
-            self.release(key, touched, out);
+        while let Some(key) = self.idle_head {
+            self.idle_unlink_head();
+            self.release(key, out);
         }
     }
 
     /// Quiesce one eviction candidate and hand back its state to flush, or drop
     /// the key outright when it has none.
-    fn release(&mut self, key: K, touched: Duration, out: &mut Vec<(K, S)>) {
-        let Some(slot) = self.keys.get_mut(&key) else {
-            return;
-        };
-        // A stale candidate: the key was touched after this entry was recorded,
-        // so a later entry covers it.
-        if slot.presence != Presence::Idle || slot.last_touch > touched {
-            return;
-        }
+    ///
+    /// The key must already be off the idle list, which is what makes this
+    /// unconditional: the list holds only idle keys, exactly once each, so
+    /// there is no stale candidate left to recognize and skip.
+    fn release(&mut self, key: K, out: &mut Vec<(K, S)>) {
+        let slot = self.keys.get_mut(&key).expect("a listed key has a slot");
+        debug_assert_eq!(slot.presence, Presence::Idle);
         match slot.resident.take() {
             Some(state) => {
                 slot.presence = Presence::Evicting;
@@ -423,13 +484,14 @@ where
             pending: self.pending,
             resident: self.keys.len(),
             evicting: self.evicting,
+            eviction_backlog: self.idle,
             queue_capacity: self.slab.capacity(),
         }
     }
 
     /// Set a slot's presence from its queue head, returning the ring it should
     /// join, or `None` when it has become idle.
-    fn settle(slab: &Slab<Item<P>>, slot: &mut Slot<S>) -> Option<ClassId> {
+    fn settle(slab: &Slab<Item<P>>, slot: &mut Slot<K, S>) -> Option<ClassId> {
         match slab.front(&slot.queue) {
             Some(head) => {
                 slot.presence = Presence::Ready(head.class);
@@ -445,7 +507,53 @@ where
     fn place(&mut self, key: K, target: Option<ClassId>, now: Duration) {
         match target {
             Some(class) => self.ready[class as usize].push_back(key),
-            None => self.eviction.push_back((key, now)),
+            None => self.idle_link(key, now),
+        }
+    }
+
+    /// Append a key that has just gone idle to the newest end of the idle
+    /// list, stamping the moment its eviction window opened.
+    fn idle_link(&mut self, key: K, now: Duration) {
+        let tail = self.idle_tail;
+        let slot = self.keys.get_mut(&key).expect("a settled key has a slot");
+        debug_assert_eq!(slot.presence, Presence::Idle);
+        debug_assert!(slot.idle_prev.is_none() && slot.idle_next.is_none());
+        slot.idle_since = now;
+        slot.idle_prev = tail;
+        match tail {
+            Some(previous) => {
+                self.keys.get_mut(&previous).expect("a listed key has a slot").idle_next =
+                    Some(key);
+            }
+            None => self.idle_head = Some(key),
+        }
+        self.idle_tail = Some(key);
+        self.idle += 1;
+    }
+
+    /// Detach the oldest idle key. The caller must have observed a non-empty
+    /// list, and owns whatever becomes of the key afterwards.
+    fn idle_unlink_head(&mut self) {
+        let key = self.idle_head.expect("the caller observed a listed key");
+        let (prev, next) = self.keys.get_mut(&key).expect("a listed key has a slot").detach();
+        debug_assert!(prev.is_none(), "the head of the idle list has no predecessor");
+        self.idle -= 1;
+        self.idle_patch(prev, next);
+    }
+
+    /// Close the idle list over a slot that was just detached from it.
+    fn idle_patch(&mut self, prev: Option<K>, next: Option<K>) {
+        match prev {
+            Some(key) => {
+                self.keys.get_mut(&key).expect("a listed key has a slot").idle_next = next;
+            }
+            None => self.idle_head = next,
+        }
+        match next {
+            Some(key) => {
+                self.keys.get_mut(&key).expect("a listed key has a slot").idle_prev = prev;
+            }
+            None => self.idle_tail = prev,
         }
     }
 
@@ -514,6 +622,44 @@ where
                 _ => {}
             }
         }
+
+        // The idle list is what bounds this scheduler's memory: it must hold
+        // every idle key, hold nothing else, and hold each of them once. The
+        // walk below establishes all three — forward links reach only idle
+        // keys, back links agree with them (so no key appears twice without
+        // one of the two disagreeing), and the count reconciles against the
+        // number of idle slots, which catches a key that is simply missing.
+        let mut walked = 0;
+        let mut previous = None;
+        let mut cursor = self.idle_head;
+        while let Some(key) = cursor {
+            // A cycle would otherwise spin here forever rather than fail.
+            if walked > self.keys.len() {
+                return Err("the idle list cycles");
+            }
+            walked += 1;
+            let Some(slot) = self.keys.get(&key) else {
+                return Err("a key on the idle list has no slot");
+            };
+            if slot.presence != Presence::Idle {
+                return Err("a key that is not idle is on the idle list");
+            }
+            if slot.idle_prev != previous {
+                return Err("the idle list's back links disagree with its forward links");
+            }
+            previous = cursor;
+            cursor = slot.idle_next;
+        }
+        if self.idle_tail != previous {
+            return Err("the idle list's tail is not the last key on it");
+        }
+        if !always!(walked == self.idle) {
+            return Err("the idle counter disagrees with the idle list");
+        }
+        let idle = self.keys.values().filter(|slot| slot.presence == Presence::Idle).count();
+        if !always!(walked == idle) {
+            return Err("an idle key is missing from the idle list");
+        }
         Ok(())
     }
 }
@@ -558,9 +704,9 @@ mod tests {
     fn a_backlogged_key_rotates_behind_every_other_ready_key() {
         let mut book = Book::new(config());
         let now = Duration::ZERO;
-        book.admit(item(1, IO), now);
-        book.admit(item(1, IO), now);
-        book.admit(item(2, IO), now);
+        book.admit(item(1, IO));
+        book.admit(item(1, IO));
+        book.admit(item(2, IO));
 
         let whale = book.next(IO, now).unwrap();
         assert_eq!(whale.key, 1);
@@ -574,13 +720,13 @@ mod tests {
         let mut book = Book::new(config());
         let now = Duration::ZERO;
         for key in 0..8 {
-            book.admit(item(key, IO), now);
+            book.admit(item(key, IO));
         }
         // The hot key keeps arriving; the strict bound says every other key is
         // still served within one rotation of the ring.
         let mut seen = [false; 8];
         for _ in 0..8 {
-            book.admit(item(0, IO), now);
+            book.admit(item(0, IO));
             let dispatch = book.next(IO, now).unwrap();
             seen[dispatch.key as usize] = true;
             book.complete(finish(dispatch), now);
@@ -592,9 +738,9 @@ mod tests {
     fn class_budgets_are_independent_and_a_key_serializes_across_them() {
         let mut book = Book::new(config());
         let now = Duration::ZERO;
-        book.admit(item(1, IO), now);
-        book.admit(item(1, IO), now);
-        book.admit(item(2, CPU), now);
+        book.admit(item(1, IO));
+        book.admit(item(1, IO));
+        book.admit(item(2, CPU));
 
         let io = book.next(IO, now).unwrap();
         let cpu = book.next(CPU, now).unwrap();
@@ -612,8 +758,8 @@ mod tests {
     fn a_mixed_key_moves_between_rings_in_fifo_order() {
         let mut book = Book::new(config());
         let now = Duration::ZERO;
-        book.admit(item(9, IO), now);
-        book.admit(item(9, CPU), now);
+        book.admit(item(9, IO));
+        book.admit(item(9, CPU));
         assert!(book.next(CPU, now).is_none(), "the compute item is behind the IO item");
 
         let first = book.next(IO, now).unwrap();
@@ -625,17 +771,17 @@ mod tests {
     fn state_ownership_transfers_to_exactly_one_dispatch() {
         let mut book = Book::new(config());
         let now = Duration::ZERO;
-        book.admit(item(3, IO), now);
+        book.admit(item(3, IO));
         let first = book.next(IO, now).unwrap();
         assert_eq!(first.state, None, "a cold key carries no state");
         book.complete(Completion { key: 3, class: IO, state: Disposition::Keep(77) }, now);
 
-        book.admit(item(3, IO), now);
+        book.admit(item(3, IO));
         let second = book.next(IO, now).unwrap();
         assert_eq!(second.state, Some(77), "resident state follows the key");
         book.complete(Completion { key: 3, class: IO, state: Disposition::Drop }, now);
 
-        book.admit(item(3, IO), now);
+        book.admit(item(3, IO));
         let third = book.next(IO, now).unwrap();
         assert_eq!(third.state, None, "a dropped disposition forces a reload");
         book.complete(finish(third), now);
@@ -645,9 +791,9 @@ mod tests {
     fn expired_items_are_discarded_at_dispatch_and_handed_back() {
         let mut book = Book::new(config());
         let deadline = Duration::from_secs(1);
-        book.admit(expiring(4, IO, deadline), Duration::ZERO);
-        book.admit(expiring(5, IO, deadline), Duration::ZERO);
-        book.admit(item(6, IO), Duration::ZERO);
+        book.admit(expiring(4, IO, deadline));
+        book.admit(expiring(5, IO, deadline));
+        book.admit(item(6, IO));
 
         let now = Duration::from_secs(2);
         let dispatch = book.next(IO, now).expect("the item without a deadline survives");
@@ -664,8 +810,8 @@ mod tests {
     fn expiring_a_ring_head_re_places_the_key_on_its_next_class() {
         let mut book = Book::new(config());
         let deadline = Duration::from_secs(1);
-        book.admit(expiring(7, IO, deadline), Duration::ZERO);
-        book.admit(item(7, CPU), Duration::ZERO);
+        book.admit(expiring(7, IO, deadline));
+        book.admit(item(7, CPU));
 
         let now = Duration::from_secs(2);
         assert!(book.next(IO, now).is_none(), "the only IO item expired");
@@ -677,7 +823,7 @@ mod tests {
     #[test]
     fn idle_keys_are_evicted_after_their_ttl_and_flushed_once() {
         let mut book = Book::new(config());
-        book.admit(item(5, IO), Duration::ZERO);
+        book.admit(item(5, IO));
         let _dispatch = book.next(IO, Duration::ZERO).unwrap();
         book.complete(
             Completion { key: 5, class: IO, state: Disposition::Keep(42) },
@@ -700,7 +846,7 @@ mod tests {
     #[test]
     fn work_arriving_during_a_flush_waits_and_then_reloads() {
         let mut book = Book::new(config());
-        book.admit(item(8, IO), Duration::ZERO);
+        book.admit(item(8, IO));
         let _dispatch = book.next(IO, Duration::ZERO).unwrap();
         book.complete(
             Completion { key: 8, class: IO, state: Disposition::Keep(11) },
@@ -713,7 +859,7 @@ mod tests {
         assert_eq!(flushed, vec![(8, 11)]);
 
         // The key is quiesced: nothing dispatches while the flush is running.
-        book.admit(item(8, IO), now);
+        book.admit(item(8, IO));
         assert!(book.next(IO, now).is_none(), "a quiesced key must not dispatch");
         assert_eq!(book.check_invariants(), Ok(()));
 
@@ -727,7 +873,7 @@ mod tests {
     fn evict_all_flushes_every_resident_key_regardless_of_idle_time() {
         let mut book = Book::new(Config { evict_iters: 1, ..config() });
         for key in 0..4 {
-            book.admit(item(key, IO), Duration::ZERO);
+            book.admit(item(key, IO));
             let _dispatch = book.next(IO, Duration::ZERO).expect("the key dispatches");
             book.complete(
                 Completion { key, class: IO, state: Disposition::Keep(key * 10) },
@@ -754,13 +900,13 @@ mod tests {
     fn evict_all_skips_keys_that_are_not_idle() {
         let mut book = Book::new(config());
         // Key 2 goes resident and idle; key 1 is left holding its state.
-        book.admit(item(2, IO), Duration::ZERO);
+        book.admit(item(2, IO));
         let _dispatch = book.next(IO, Duration::ZERO).expect("key 2 dispatches");
         book.complete(
             Completion { key: 2, class: IO, state: Disposition::Keep(9) },
             Duration::ZERO,
         );
-        book.admit(item(1, IO), Duration::ZERO);
+        book.admit(item(1, IO));
         let inflight = book.next(IO, Duration::ZERO).expect("key 1 dispatches");
 
         let mut flushed = Vec::new();
@@ -771,31 +917,139 @@ mod tests {
     }
 
     #[test]
-    fn a_reactivated_key_survives_its_stale_eviction_candidate() {
+    fn reactivating_a_key_restarts_its_idle_window_from_the_back_of_the_list() {
         let mut book = Book::new(config());
-        book.admit(item(5, IO), Duration::ZERO);
+        book.admit(item(5, IO));
         let first = book.next(IO, Duration::ZERO).unwrap();
         book.complete(finish(first), Duration::ZERO);
+        assert_eq!(book.snapshot().eviction_backlog, 1);
 
         let later = Duration::from_secs(5);
-        book.admit(item(5, IO), later);
+        book.admit(item(5, IO));
+        assert_eq!(book.snapshot().eviction_backlog, 0, "a touched key leaves the idle list");
         let second = book.next(IO, later).unwrap();
         book.complete(finish(second), later);
+        assert_eq!(book.snapshot().eviction_backlog, 1, "and rejoins it when it settles");
+        assert_eq!(book.check_invariants(), Ok(()));
 
         let mut flushed = Vec::new();
         book.evict(Duration::from_secs(11), &mut flushed);
-        assert!(flushed.is_empty(), "the stale candidate must not evict a reactivated key");
+        assert!(flushed.is_empty(), "the window runs from the second completion, not the first");
         assert_eq!(book.snapshot().resident, 1);
 
         book.evict(Duration::from_secs(16), &mut flushed);
         assert_eq!(flushed.len(), 1);
     }
 
+    /// The property the intrusive list exists for. A key that cycles through
+    /// idle over and over must occupy exactly one entry the whole time — under
+    /// the timestamped candidate queue this grew once per completion, without
+    /// any bound, which is the bug this replaced.
+    #[test]
+    fn idle_tracking_is_bounded_by_resident_keys_however_often_they_cycle() {
+        let mut book = Book::new(Config { evict_iters: 0, ..config() });
+        let mut now = Duration::ZERO;
+        for round in 0..500u64 {
+            for key in 0..4 {
+                now += Duration::from_millis(1);
+                book.admit(item(key, IO));
+                let dispatch = book.next(IO, now).expect("the key dispatches");
+                book.complete(finish(dispatch), now);
+            }
+            let snapshot = book.snapshot();
+            assert_eq!(
+                snapshot.eviction_backlog, snapshot.resident,
+                "every resident key is idle here, and each may appear once (round {round})"
+            );
+            assert_eq!(snapshot.eviction_backlog, 4, "four keys, whatever the throughput");
+        }
+        assert_eq!(book.check_invariants(), Ok(()));
+    }
+
+    /// Eviction order is by idle time, not by arrival, so touching the middle
+    /// of the list has to move that key to the back of it.
+    #[test]
+    fn the_idle_list_evicts_least_recently_idled_first_across_unlink_positions() {
+        let mut book = Book::new(Config { max_resident: Some(0), evict_iters: 8, ..config() });
+        fn settle(book: &mut Book, key: u64, now: Duration) {
+            book.admit(item(key, IO));
+            book.next(IO, now).expect("the key dispatches");
+            book.complete(Completion { key, class: IO, state: Disposition::Keep(key) }, now);
+        }
+        for key in 0..4 {
+            settle(&mut book, key, Duration::from_secs(key));
+        }
+        // Touch the head and the middle, in that order: both unlink from
+        // positions that exercise different arms of the patch.
+        settle(&mut book, 0, Duration::from_secs(10));
+        settle(&mut book, 2, Duration::from_secs(11));
+        assert_eq!(book.check_invariants(), Ok(()));
+
+        let mut flushed = Vec::new();
+        book.evict(Duration::from_secs(12), &mut flushed);
+        assert_eq!(
+            flushed,
+            vec![(1, 1), (3, 3), (0, 0), (2, 2)],
+            "untouched keys first in their original order, then the two that were touched"
+        );
+        assert_eq!(book.snapshot().eviction_backlog, 0);
+    }
+
+    #[test]
+    fn a_key_with_no_resident_state_leaves_the_idle_list_by_being_dropped() {
+        let mut book = Book::new(config());
+        book.admit(item(6, IO));
+        let dispatch = book.next(IO, Duration::ZERO).unwrap();
+        book.complete(Completion { key: 6, class: IO, state: Disposition::Drop }, Duration::ZERO);
+        let _ = dispatch;
+        assert_eq!(
+            book.snapshot().eviction_backlog,
+            1,
+            "a stateless idle key is still a candidate"
+        );
+
+        let mut flushed = Vec::new();
+        book.evict(Duration::from_secs(11), &mut flushed);
+        assert!(flushed.is_empty(), "there is nothing to flush");
+        let snapshot = book.snapshot();
+        assert_eq!(snapshot.resident, 0, "but the map entry is reclaimed");
+        assert_eq!(snapshot.eviction_backlog, 0);
+        assert_eq!(book.check_invariants(), Ok(()));
+    }
+
+    #[test]
+    fn a_key_quiescing_for_eviction_is_not_a_candidate_again_until_it_settles() {
+        let mut book = Book::new(config());
+        book.admit(item(7, IO));
+        let dispatch = book.next(IO, Duration::ZERO).unwrap();
+        book.complete(
+            Completion { key: 7, class: IO, state: Disposition::Keep(3) },
+            Duration::ZERO,
+        );
+        let _ = dispatch;
+
+        let mut flushed = Vec::new();
+        let now = Duration::from_secs(11);
+        book.evict(now, &mut flushed);
+        assert_eq!(flushed, vec![(7, 3)]);
+        assert_eq!(book.snapshot().eviction_backlog, 0, "an evicting key is off the list");
+
+        // Work queues behind the flush, so the key settles into a ring rather
+        // than back onto the idle list.
+        book.admit(item(7, IO));
+        book.finish_evict(7, now);
+        assert_eq!(book.snapshot().eviction_backlog, 0);
+        let after = book.next(IO, now).expect("the key resumes");
+        book.complete(finish(after), now);
+        assert_eq!(book.snapshot().eviction_backlog, 1, "and only rejoins once it is idle");
+        assert_eq!(book.check_invariants(), Ok(()));
+    }
+
     #[test]
     fn capacity_pressure_evicts_before_the_idle_window_elapses() {
         let mut book = Book::new(Config { max_resident: Some(1), ..config() });
         for key in 0..3 {
-            book.admit(item(key, IO), Duration::ZERO);
+            book.admit(item(key, IO));
             let _dispatch = book.next(IO, Duration::ZERO).unwrap();
             book.complete(
                 Completion { key, class: IO, state: Disposition::Keep(key) },
@@ -821,8 +1075,10 @@ mod tests {
         assert_eq!(book.max_pending(), 2);
         assert_eq!(book.config().max_inflight, [1, 1]);
 
-        book.admit(item(1, IO), Duration::ZERO);
-        book.admit(item(2, CPU), Duration::ZERO);
+        book.admit(item(1, IO));
+        assert_eq!(book.pending(), 1, "queued work counts against the cap immediately");
+        book.admit(item(2, CPU));
+        assert_eq!(book.pending(), 2);
         assert!(book.is_saturated());
         let dispatch = book.next(IO, Duration::ZERO).unwrap();
         assert_eq!(
@@ -833,6 +1089,7 @@ mod tests {
                 pending: 2,
                 resident: 2,
                 evicting: 0,
+                eviction_backlog: 0,
                 queue_capacity: 2,
             }
         );
@@ -851,7 +1108,7 @@ mod tests {
         });
         let now = Duration::ZERO;
         for class in 0..3u8 {
-            book.admit(Admit { key: u64::from(class), class, expires_at: None, payload: "w" }, now);
+            book.admit(Admit { key: u64::from(class), class, expires_at: None, payload: "w" });
         }
         for class in 0..3u8 {
             let dispatch = book.next(class, now).expect("each class has its own budget");

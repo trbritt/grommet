@@ -209,3 +209,110 @@ async fn an_old_duplicate_cannot_regress_newer_state() {
     assert_eq!(reply, Reply::Ok(40), "the genuinely missing request still applies");
     assert_eq!(resident(&outcome), Some(Account { balance: 40, version: 4 }));
 }
+
+#[tokio::test]
+async fn a_debit_moves_the_balance_the_other_way_from_a_credit() {
+    let world = SimWorld::healthy();
+    let (_, funded) = run(&world, None, 1, Op::Credit(100)).await;
+    let (reply, outcome) = run(&world, resident(&funded), 2, Op::Debit(30)).await;
+
+    assert_eq!(reply, Reply::Ok(70), "a debit subtracts; the sign is the whole operation");
+    assert_eq!(resident(&outcome), Some(Account { balance: 70, version: 2 }));
+    assert_eq!(world.store.account(ACCOUNT), Account { balance: 70, version: 2 });
+}
+
+#[tokio::test]
+async fn a_zero_amount_is_a_legal_operation_rather_than_a_rejected_one() {
+    // The guard rejects negative amounts. Zero is on the legal side of it: a
+    // no-op transfer still has to be recorded against its request id, or a
+    // caller retrying one would never converge.
+    let world = SimWorld::healthy();
+    let (reply, outcome) = run(&world, None, 1, Op::Credit(0)).await;
+    assert_eq!(reply, Reply::Ok(0));
+    assert_eq!(resident(&outcome), Some(Account { balance: 0, version: 1 }));
+
+    let (reply, outcome) = run(&world, resident(&outcome), 2, Op::Debit(0)).await;
+    assert_eq!(reply, Reply::Ok(0));
+    assert_eq!(resident(&outcome), Some(Account { balance: 0, version: 2 }));
+    assert_eq!(world.store.applied_requests(), 2, "both were recorded, not shed");
+}
+
+#[tokio::test]
+async fn a_negative_amount_is_refused_without_touching_anything() {
+    let world = SimWorld::healthy();
+    for (id, op) in [(1u128, Op::Debit(-1)), (2, Op::Credit(-1))] {
+        let (reply, outcome) = run(&world, None, id, op).await;
+        assert!(matches!(reply, Reply::Err(_)), "a negative amount is a client error");
+        assert_eq!(resident(&outcome), Some(Account::default()));
+    }
+    assert_eq!(world.store.applied_requests(), 0, "a refused amount never reaches the store");
+    assert_eq!(world.store.account(ACCOUNT), Account::default());
+}
+
+#[tokio::test]
+async fn a_duplicate_newer_than_our_snapshot_replaces_it() {
+    let world = SimWorld::healthy();
+    let (_, first) = run(&world, None, 1, Op::Credit(10)).await;
+    let stale = resident(&first).expect("the first credit stays resident");
+    let (_, second) = run(&world, Some(stale.clone()), 2, Op::Credit(10)).await;
+    assert_eq!(resident(&second), Some(Account { balance: 20, version: 2 }));
+
+    // Replay id 2 while holding the *older* version-1 snapshot. The recorded
+    // outcome is ahead of what we hold, so it is the one to keep — holding on
+    // to the stale snapshot would send the next request into a version
+    // conflict it can never win.
+    let (reply, outcome) = run(&world, Some(stale), 2, Op::Credit(10)).await;
+    assert_eq!(reply, Reply::Duplicate(20));
+    assert_eq!(resident(&outcome), Some(Account { balance: 20, version: 2 }));
+}
+
+#[tokio::test]
+async fn at_equal_versions_the_recorded_outcome_wins_over_what_we_hold() {
+    let world = SimWorld::healthy();
+    let (_, first) = run(&world, None, 1, Op::Credit(10)).await;
+    assert_eq!(resident(&first), Some(Account { balance: 10, version: 1 }));
+
+    // A resident snapshot that agrees on the version but not the balance is
+    // divergent, and only the store can say which is right. The rule is
+    // strict: we keep ours only when we are strictly newer.
+    let divergent = Account { balance: 999, version: 1 };
+    let (reply, outcome) = run(&world, Some(divergent), 1, Op::Credit(10)).await;
+    assert_eq!(reply, Reply::Duplicate(10));
+    assert_eq!(
+        resident(&outcome),
+        Some(Account { balance: 10, version: 1 }),
+        "an equal version is not a newer one, so the durable record is authoritative"
+    );
+}
+
+#[tokio::test]
+async fn a_shed_request_is_answered_rather_than_dropped_silently() {
+    let world = SimWorld::healthy();
+    let (call, reply) = request(1, Op::Credit(10));
+    world.processor().on_expired(ACCOUNT, call);
+
+    let answer = reply.await.expect("a shed caller is still owed an answer");
+    assert!(
+        matches!(answer, Reply::Err(message) if message.contains("deadline")),
+        "the caller has to be told why nothing happened"
+    );
+    assert_eq!(world.store.applied_requests(), 0);
+}
+
+#[test]
+fn a_request_routes_by_its_operation_and_identifies_itself_by_its_ulid() {
+    use grommet::{COMPUTE, IO, Work};
+
+    let compute = Request {
+        req_id: RequestId::from(9u128),
+        account: ACCOUNT,
+        op: Op::Revalue(RevalueParams { scenarios: 1 }),
+    };
+    assert_eq!(compute.class(), COMPUTE, "revaluation must not occupy an IO budget");
+    assert_eq!(compute.key(), ACCOUNT);
+    assert_eq!(compute.request_id(), Some(9), "the ULID is the idempotency key verbatim");
+
+    let io = Request { req_id: RequestId::from(4u128), account: ACCOUNT, op: Op::Credit(1) };
+    assert_eq!(io.class(), IO);
+    assert_eq!(io.request_id(), Some(4));
+}
