@@ -43,6 +43,8 @@ use std::collections::hash_map::Entry;
 use std::hash::Hash;
 use std::time::Duration;
 
+pub mod timer;
+
 mod queue;
 use queue::{List, Slab};
 

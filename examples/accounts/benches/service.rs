@@ -152,6 +152,66 @@ impl Drop for Harness {
 /// atomic load, while `SystemClock` — the production default — is
 /// `Instant::elapsed`. Measuring only the cheap one would understate what a
 /// real front door saves.
+/// The timer wheel's hot path.
+///
+/// A reactor that parks asks whether anything is due once per wakeup; one that
+/// never parks asks every turn, which is the case that decides whether the
+/// wheel can sit in a busy-poll loop at all. Arm and cancel are measured as a
+/// pair because that is how a per-dispatch deadline would use them.
+///
+/// The `Duration` entry points are used throughout, so the tick conversion is
+/// inside every measurement rather than hoisted out of it.
+fn timer(c: &mut Criterion) {
+    use grommet_core::timer::Wheel;
+
+    let mut group = c.benchmark_group("timer");
+
+    // Loaded with entries spread across every level, so the answer is not
+    // coming from an empty wheel.
+    let mut loaded: Wheel<u64> = Wheel::with_capacity(4096);
+    for index in 0..2_048u64 {
+        loaded.try_insert_duration(Duration::from_micros(index * 37 + 1), index).unwrap();
+    }
+
+    group.bench_function("is_due/not_yet", |b| {
+        let now = Duration::ZERO;
+        b.iter(|| black_box(loaded.is_due_duration(black_box(now))));
+    });
+
+    group.bench_function("next_deadline", |b| {
+        b.iter(|| black_box(loaded.next_wakeup_duration()));
+    });
+
+    group.bench_function("insert_cancel", |b| {
+        let mut wheel: Wheel<u64> = Wheel::with_capacity(4096);
+        for index in 0..1_024u64 {
+            wheel.try_insert_duration(Duration::from_micros(index * 91 + 7), index).unwrap();
+        }
+        let mut round = 0u64;
+        b.iter(|| {
+            round = round.wrapping_add(1);
+            let id = wheel
+                .try_insert_duration(Duration::from_micros(round % 100_000 + 1), round)
+                .expect("the wheel has room");
+            black_box(wheel.cancel(black_box(id)))
+        });
+    });
+
+    // A sweep that finds nothing, which is what a periodic tick mostly does.
+    group.bench_function("advance/nothing_due", |b| {
+        let mut wheel: Wheel<u64> = Wheel::with_capacity(64);
+        wheel.try_insert_duration(Duration::from_secs(3_600), 1).unwrap();
+        let mut due = Vec::new();
+        let mut at = Duration::ZERO;
+        b.iter(|| {
+            at += Duration::from_micros(1);
+            let fired = wheel.advance_duration(black_box(at), &mut due).expect("in range");
+            debug_assert_eq!(fired, 0);
+        });
+    });
+    group.finish();
+}
+
 fn submission(c: &mut Criterion) {
     const BATCH: usize = 64;
 
@@ -268,5 +328,5 @@ fn reactor(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, domain, scheduler, submission, reactor);
+criterion_group!(benches, domain, scheduler, timer, submission, reactor);
 criterion_main!(benches);
