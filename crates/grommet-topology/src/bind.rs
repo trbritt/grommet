@@ -13,10 +13,15 @@
 //! amount of correct CPU placement recovers it.
 
 use crate::plan::{OffloadPool, Plan, ShardPlacement};
+#[cfg(feature = "hwloc")]
 use hwlocality::cpu::binding::CpuBindingFlags;
+#[cfg(feature = "hwloc")]
 use hwlocality::cpu::cpuset::CpuSet;
+#[cfg(feature = "hwloc")]
 use hwlocality::memory::binding::{MemoryBindingFlags, MemoryBindingPolicy};
+#[cfg(feature = "hwloc")]
 use hwlocality::memory::nodeset::NodeSet;
+#[cfg(feature = "hwloc")]
 use hwlocality::object::types::ObjectType;
 
 /// What binding achieved for one thread, as distinct from what was requested.
@@ -35,6 +40,7 @@ impl Bound {
     }
 }
 
+#[cfg(feature = "hwloc")]
 impl Plan {
     /// Bind the calling thread to `placement`. Call this from the thread being
     /// placed, as the first thing it does — memory binding only governs pages
@@ -95,7 +101,38 @@ impl Plan {
     }
 }
 
-#[cfg(test)]
+/// Without hwloc there is no way to ask the operating system for a placement,
+/// so these report exactly that.
+///
+/// They are deliberately not errors. A plan built by the fallback already says
+/// `can_bind_cpu: false` and carries a note explaining why, the runtime's
+/// `TopologyReport` will show nothing pinned, and `PinPolicy::Require` refuses
+/// to start at all — so the shortfall is visible at three levels before any
+/// timing is measured. Making the calls themselves fail would only force every
+/// caller to handle a case that is already reported.
+#[cfg(not(feature = "hwloc"))]
+impl Plan {
+    /// Bind the calling thread to `placement`. Always floating in this build.
+    pub fn bind_shard(&self, placement: &ShardPlacement) -> Bound {
+        let _ = placement;
+        Bound::default()
+    }
+
+    /// Bind one offload worker. Always floating in this build.
+    pub fn bind_offload_worker(&self, pool: &OffloadPool, worker: usize) -> Bound {
+        let _ = (pool, worker);
+        Bound::default()
+    }
+
+    /// Bind the calling thread to `cpus` and its allocations to `node`. Always
+    /// floating in this build.
+    pub fn bind_current(&self, cpus: &[usize], node: usize) -> Bound {
+        let _ = (cpus, node);
+        Bound::default()
+    }
+}
+
+#[cfg(all(test, feature = "hwloc"))]
 mod tests {
     use super::*;
     use crate::Workload;

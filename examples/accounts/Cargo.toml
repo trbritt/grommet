@@ -57,9 +57,13 @@ default = ["gen", "vendored"]
 gen = ["dep:bolero-generator"]
 sim = ["dep:turmoil"]
 
+# Hardware placement. This example demonstrates it, so it is on by default;
+# `topology` without `vendored` links a system libhwloc instead of building one.
+topology = ["grommet/topology", "grommet-offload/topology", "grommet-testkit/topology"]
+
 # Build libhwloc from source. See `grommet-topology` for why that is the
 # default and what it costs.
-vendored = ["grommet/vendored", "grommet-offload/vendored", "grommet-testkit/vendored"]
+vendored = ["topology", "grommet/vendored", "grommet-offload/vendored", "grommet-testkit/vendored"]
 
 [dev-dependencies]
 bolero = "0.13"

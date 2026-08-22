@@ -22,23 +22,38 @@ ahash = "0.8"
 futures = "0.3"
 tokio = { version = "1", features = ["rt", "sync", "time", "macros"] }
 grommet-core = { workspace = true }
-# `default-features = false` so the vendored-versus-system libhwloc choice is
-# re-exported below rather than fixed here. A Cargo feature cannot turn off a
-# dependency's default, so a crate that wants to link the system library has to
-# be able to reach that switch from the top of the graph.
-grommet-topology = { workspace = true }
+# `default-features = false` so both switches below — whether to use hwloc at
+# all, and vendored versus system — are re-exported here rather than fixed. A
+# Cargo feature cannot turn off a dependency's default, so a crate that wants
+# either choice has to be able to reach it from the top of the graph.
+grommet-topology = { workspace = true, default-features = false }
 
 [features]
-default = ["vendored"]
+default = ["topology", "vendored"]
+
+# Read the machine and bind threads to it, through libhwloc.
+#
+# On by default, because hardware-aware placement is what this runtime is for
+# and a default that cannot pin a thread would misrepresent it. Turning it off
+# with `default-features = false` gives a pure-Rust build in seconds — no C
+# toolchain, no build-time network fetch, and musl and air-gapped builds work —
+# at the cost of real placement: layout is planned from `available_parallelism`
+# alone and no thread is bound. `PinPolicy::Require` does not exist in that
+# build, so asking for placement you cannot get is a compile error rather than
+# a silently unpinned process.
+topology = ["grommet-topology/hwloc"]
 
 # Build libhwloc from source. See `grommet-topology` for why that is the
 # default and what it costs.
-vendored = ["grommet-topology/vendored"]
+vendored = ["topology", "grommet-topology/vendored"]
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "sync", "time", "macros", "test-util"] }
 
 # See `grommet-topology`: the vendored libhwloc build needs network access,
-# which a docs.rs build does not have.
+# which a docs.rs build does not have. `topology` is named explicitly so the
+# documentation still describes the default configuration rather than the
+# pure-Rust opt-out.
 [package.metadata.docs.rs]
 no-default-features = true
+features = ["topology"]

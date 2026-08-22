@@ -84,8 +84,44 @@ let balance = runtime.router().call(job).await?;
 
 `grommet-core` depends on `ahash` and nothing else. `grommet` adds `tokio` and
 `futures`. Reading the machine lives in `grommet-topology`, which wraps
-`hwlocality` and builds libhwloc from source by default. Turn off its `vendored`
-feature to link a system one. Rayon is a separate crate you opt into.
+`hwlocality`. Rayon is a separate crate you opt into.
+
+## Features
+
+| Feature | Default | What it does |
+|---|---|---|
+| `topology` | on | Read the machine through libhwloc and bind threads to it. |
+| `vendored` | on | Build libhwloc from source rather than linking a system one. Implies `topology`. |
+
+The default builds libhwloc from source, which needs a C toolchain, autotools
+and network access at build time. That is the default because hardware-aware
+placement is what this runtime is *for*, and because linking a system libhwloc
+is the less reliable path: `pkg-config` finds nothing on a stock macOS install,
+and distribution packages lag the hwloc 2.8 API floor.
+
+Three configurations, and what each is for:
+
+```toml
+# Default. Plans and binds against the real machine.
+grommet = "0.1"
+
+# System libhwloc instead of a vendored build. For distribution packaging and
+# reproducible builds, where a build-time download is unacceptable.
+grommet = { version = "0.1", default-features = false, features = ["topology"] }
+
+# No hwloc at all: pure Rust, builds in seconds, works on musl and air-gapped.
+grommet = { version = "0.1", default-features = false }
+```
+
+The last one still plans a layout and still starts a runtime — every type stays
+where it was — but it plans from `available_parallelism` alone, knows nothing
+about SMT siblings, memory nodes or core kinds, and binds no threads. It says
+all of that in `Plan::notes`, and `Runtime::topology()` reports nothing pinned.
+
+`PinPolicy::Require` does not exist in that build. Demanding placement from a
+configuration that cannot perform it is a contradiction rather than a strict
+setting, so it is a compile error at the call site rather than a process that
+starts unpinned and quietly measures the OS scheduler instead of this one.
 
 ## What the runtime guarantees
 

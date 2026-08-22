@@ -15,15 +15,31 @@
 
 pub use grommet_topology::{
     Advice, Bound, Observation, OffloadPool, Plan, Quota, ShardPlacement, Verdict, Workload, bind,
-    calibrate, cgroup, detect, plan, plan_shared,
+    calibrate, cgroup, detect,
 };
+#[cfg(feature = "topology")]
+pub use grommet_topology::{plan, plan_shared};
 
 /// What to do when a shard thread cannot be bound to its placement.
+///
+/// # Without the `topology` feature
+///
+/// `PinPolicy::Require` does not exist. A build with no hwloc cannot bind a thread at
+/// all, so demanding that it succeed is a contradiction rather than a strict
+/// setting — and one worth hearing about from the compiler rather than from a
+/// latency graph. Code that names it fails to build until either the feature
+/// is enabled or the demand is dropped, which are exactly the two ways out.
+///
+/// The other two variants mean what they always did: `BestEffort` starts and
+/// reports that nothing was pinned, `Disabled` does not plan a layout at all.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum PinPolicy {
     /// Refuse to start. Choose this when a benchmark or latency budget is only
     /// meaningful with real pinning — it turns a silently unpinned run into a
     /// startup error instead of a misleading measurement.
+    ///
+    /// Requires the `topology` feature.
+    #[cfg(feature = "topology")]
     Require,
     /// Start anyway and report it. The scheduler is still correct; its timing is
     /// just at the OS scheduler's mercy.

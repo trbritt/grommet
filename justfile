@@ -31,14 +31,33 @@ doc-test:
 doc:
     RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
 
+# The pure-Rust configuration: hwloc opted out entirely.
+#
+# This is what a musl image, an air-gapped build, or a distribution package that
+# refuses a build-time download actually compiles. It has no C toolchain, no
+# network fetch and no libhwloc, so nothing else in this file would notice it
+# breaking — and what breaks it is usually a `#[cfg]` that drifted rather than
+# anything anyone would think to test.
+#
+# The example is deliberately absent: it demonstrates hardware placement, so
+# building it without hwloc would be demonstrating the wrong thing.
+test-no-topology:
+    cargo test -p grommet -p grommet-core -p grommet-topology -p grommet-offload \
+        -p grommet-testkit --no-default-features --all-targets
+    cargo test -p grommet -p grommet-core -p grommet-topology -p grommet-offload \
+        -p grommet-testkit --no-default-features --doc
+
 # The same gate against a system libhwloc instead of a vendored one.
 #
 # This is the path for distribution packaging, reproducible builds, and anywhere
 # the build-time download is unacceptable. It needs libhwloc 2.8 or newer
 # installed and findable by pkg-config. CI runs it so the opt-out cannot rot.
+# `topology` without `vendored` is what names the system library: the first
+# turns hwloc on, the second is what would have built it from source.
 test-system-hwloc:
-    cargo test --workspace --all-targets --no-default-features --features accounts/gen
-    cargo test --workspace --doc --no-default-features --features accounts/gen
+    cargo test --workspace --all-targets --no-default-features \
+        --features accounts/gen,accounts/topology
+    cargo test --workspace --doc --no-default-features --features accounts/gen,accounts/topology
 
 # A publish cannot be taken back, so every manifest is checked for the metadata
 # and the packageability crates.io demands before a tag exists, not after.
