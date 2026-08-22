@@ -44,7 +44,7 @@ where
     Fut: Future<Output = T>,
 {
     let clock = ManualClock::new();
-    let (tx, rx) = tokio::sync::mpsc::channel(64);
+    let (tx, rx) = grommet::channel(64);
     let router = Arc::new(AccountRouter::new(vec![tx], clock.clone()));
     let mut cfg = ShardConfig::new([64, 8]);
     cfg.tick = std::time::Duration::from_millis(1);
@@ -128,7 +128,7 @@ async fn replaying_the_whole_workload_never_applies_it_twice() {
 async fn a_retry_arriving_while_its_original_is_outstanding_is_coalesced() {
     let world = SimWorld::healthy();
     let clock = ManualClock::new();
-    let (tx, rx) = tokio::sync::mpsc::channel(16);
+    let (tx, rx) = grommet::channel(16);
     let router = Arc::new(AccountRouter::new(vec![tx], clock.clone()));
     let mut cfg = ShardConfig::new([64, 8]);
     cfg.tick = std::time::Duration::from_millis(1);

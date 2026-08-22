@@ -1,6 +1,7 @@
 //! Building and owning a set of pinned shards.
 
 use crate::clock::{Clock, SystemClock};
+use crate::mailbox;
 use crate::metrics::ShardStats;
 use crate::processor::Processor;
 use crate::router::Router;
@@ -10,7 +11,6 @@ use crate::work::Envelope;
 use std::fmt;
 use std::sync::Arc;
 use std::thread::JoinHandle;
-use tokio::sync::mpsc;
 
 /// What a shard thread knows about itself when it builds its processor.
 ///
@@ -43,12 +43,21 @@ impl ShardContext {
 }
 
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum BuildError {
     /// [`PinPolicy::Require`] was set and these shard indices could not be
     /// pinned.
     NotPinned(Vec<usize>),
     /// A shard thread died before it reported its placement.
     ShardFailed,
+    /// The mailbox is deeper than the scheduler will ever admit, so most of
+    /// the queue would sit where the scheduler cannot see it: it is missing
+    /// from `pending`, it does not close the admission gate, and it is not
+    /// bounded by the limit that appears to bound it.
+    ///
+    /// Raise `ShardConfig::scheduler.max_pending` to at least the mailbox
+    /// depth, or shrink the mailbox.
+    MailboxDeeperThanScheduler { mailbox: usize, max_pending: usize },
 }
 
 impl fmt::Display for BuildError {
@@ -58,6 +67,12 @@ impl fmt::Display for BuildError {
                 write!(f, "shards {shards:?} could not be pinned under PinPolicy::Require")
             }
             Self::ShardFailed => f.write_str("a shard thread failed during startup"),
+            Self::MailboxDeeperThanScheduler { mailbox, max_pending } => write!(
+                f,
+                "mailbox depth {mailbox} exceeds max_pending {max_pending}, so {} items \
+                 would queue where the scheduler cannot account for them",
+                mailbox - max_pending,
+            ),
         }
     }
 }
@@ -115,10 +130,30 @@ impl<P: Processor, C: Clock, const CLASSES: usize> Builder<P, C, CLASSES> {
 
     /// Mailbox depth per shard. This is the queue that absorbs bursts before
     /// submitters feel backpressure.
+    ///
+    /// Depth composes rather than replaces: a shard holds up to `capacity`
+    /// items here *plus* whatever its scheduler has already admitted, so the
+    /// worst-case queue in front of one shard is
+    /// `capacity + ShardConfig::scheduler.max_pending` items, and the
+    /// worst-case queue-wait is that many items times the service time. Size
+    /// the pair against your latency objective, not either one alone.
+    ///
+    /// # Panics
+    ///
+    /// If `capacity` is zero.
     pub fn mailbox(mut self, capacity: usize) -> Self {
         assert!(capacity > 0, "a mailbox needs capacity");
         self.mailbox = capacity;
         self
+    }
+
+    /// The worst-case number of items queued in front of one shard: its
+    /// mailbox plus everything its scheduler will admit.
+    ///
+    /// This is the number that sets tail latency, and it is the one worth
+    /// watching when tuning either half.
+    pub fn queue_depth(&self) -> usize {
+        self.mailbox.saturating_add(self.shard_config.scheduler.max_pending)
     }
 
     pub fn shard_config(mut self, config: ShardConfig<CLASSES>) -> Self {
@@ -163,6 +198,16 @@ impl<P: Processor, C: Clock, const CLASSES: usize> Builder<P, C, CLASSES> {
     where
         F: Fn(&ShardContext) -> P + Send + Sync + 'static,
     {
+        // Cross-validate before anything is started, so a misconfiguration
+        // costs nothing and is reported once rather than per shard.
+        let max_pending = self.shard_config.scheduler.max_pending;
+        if self.mailbox > max_pending {
+            return Err(BuildError::MailboxDeeperThanScheduler {
+                mailbox: self.mailbox,
+                max_pending,
+            });
+        }
+
         // Reading the machine is deferred to here rather than done in `new`, so
         // that a runtime which never starts never pays for it, and so a caller
         // who supplies a plan never reads the machine twice.
@@ -190,7 +235,7 @@ impl<P: Processor, C: Clock, const CLASSES: usize> Builder<P, C, CLASSES> {
         let mut stats = Vec::with_capacity(self.shards);
 
         for index in 0..self.shards {
-            let (tx, rx) = mpsc::channel::<Envelope<P::Work>>(self.mailbox);
+            let (tx, rx) = mailbox::channel::<Envelope<P::Work>>(self.mailbox);
             senders.push(tx);
             let shard_stats = Arc::new(ShardStats::<CLASSES>::default());
             stats.push(shard_stats.clone());
@@ -404,6 +449,38 @@ mod tests {
             responder.send(count);
             Ok(Disposition::Keep(count))
         }
+    }
+
+    #[test]
+    fn a_mailbox_deeper_than_the_scheduler_is_refused_before_anything_starts() {
+        let mut config = ShardConfig::new([4, 4]);
+        config.scheduler.max_pending = 16;
+        let error = Runtime::<Counter>::builder(1, [4, 4])
+            .pin(PinPolicy::Disabled)
+            .shard_config(config)
+            .mailbox(64)
+            .spawn(|_| unreachable!("the factory must never run for a rejected configuration"));
+
+        let Err(error) = error else {
+            panic!("a mailbox the scheduler cannot account for is a misconfiguration");
+        };
+        assert!(matches!(
+            error,
+            BuildError::MailboxDeeperThanScheduler { mailbox: 64, max_pending: 16 }
+        ));
+        assert!(error.to_string().contains("48"), "the message names the unaccounted depth");
+    }
+
+    #[test]
+    fn queue_depth_is_the_mailbox_and_the_scheduler_together() {
+        let mut config = ShardConfig::<2>::new([4, 4]);
+        config.scheduler.max_pending = 512;
+        let builder = Runtime::<Counter>::builder(1, [4, 4]).shard_config(config).mailbox(128);
+        assert_eq!(
+            builder.queue_depth(),
+            640,
+            "tail latency is set by both queues, so the depth that matters is their sum"
+        );
     }
 
     /// A runtime over `shards` unpinned shard threads, plus the shared record of

@@ -94,7 +94,7 @@ struct Harness {
 impl Harness {
     fn new(admit_batch: usize) -> Self {
         let clock = ManualClock::new();
-        let (tx, rx) = tokio::sync::mpsc::channel(4096);
+        let (tx, rx) = grommet::channel(4096);
         let router = Arc::new(AccountRouter::new(vec![tx], clock.clone()));
         let mut cfg = ShardConfig::new([2048, 64]);
         cfg.admit_batch = admit_batch;
@@ -131,8 +131,7 @@ impl Harness {
 impl Drop for Harness {
     fn drop(&mut self) {
         // Dropping the last router handle closes the mailbox and drains.
-        self.router =
-            Arc::new(AccountRouter::new(vec![tokio::sync::mpsc::channel(1).0], ManualClock::new()));
+        self.router = Arc::new(AccountRouter::new(vec![grommet::channel(1).0], ManualClock::new()));
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }

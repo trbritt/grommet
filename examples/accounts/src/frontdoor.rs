@@ -50,6 +50,12 @@ impl<C: Clock> Frontdoor<C> {
             Err(CallError::Cancelled) => {
                 Reply::Err("request was dropped without a response".to_owned())
             }
+            // `CallError` and `SubmitError` are `#[non_exhaustive]`, so a
+            // newer grommet can report a rejection this build has never heard
+            // of. Refusing the request is the only safe answer to that: the
+            // work did not run, and guessing which of the arms above it
+            // resembles would be inventing a reason.
+            Err(other) => Reply::Err(other.to_string()),
         }
     }
 }

@@ -7,7 +7,7 @@ use grommet::{Disposition, Fallout, ProcessError, Processor};
 
 const ACCOUNT: u64 = 7;
 
-fn request(req_id: u128, op: Op) -> (AccountCall, tokio::sync::oneshot::Receiver<Reply>) {
+fn request(req_id: u128, op: Op) -> (AccountCall, grommet::Answer<Reply>) {
     AccountCall::new(Request { req_id: RequestId::from(req_id), account: ACCOUNT, op })
 }
 

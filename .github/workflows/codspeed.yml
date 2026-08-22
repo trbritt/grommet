@@ -1,0 +1,42 @@
+name: codspeed
+
+# Benchmarks run on shared CI runners, where wall-clock timings are too noisy
+# to gate on. CodSpeed measures instruction counts instead, which are stable
+# enough that a regression in the scheduler, the router or the reactor shows up
+# as a real signal rather than as runner variance.
+#
+# `just bench` still runs the ordinary walltime harness locally, which is the
+# right tool when the question is throughput on a specific machine.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  benchmarks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      # The same pin the rest of CI uses, so a benchmark result and a test
+      # result always describe the same compiler.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-05-01
+      - uses: Swatinem/rust-cache@v2
+      # `protoc` is a build dependency of the worked example, which is where
+      # the benchmarks live; the vendored libhwloc build needs the cache above
+      # for the same reason every other job does.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-codspeed,protoc
+
+      - run: cargo codspeed build -p accounts
+
+      - uses: CodSpeedHQ/action@v3
+        with:
+          run: cargo codspeed run -p accounts
+          token: ${{ secrets.CODSPEED_TOKEN }}

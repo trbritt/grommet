@@ -28,7 +28,7 @@ fn spawn_engine(sim: &mut turmoil::Sim<'_>, plan: Plan, grpc: bool) {
         async move {
             let world = SimWorld::new(plan);
             let clock = ManualClock::new();
-            let (tx, rx) = tokio::sync::mpsc::channel::<grommet::Envelope<AccountCall>>(32);
+            let (tx, rx) = grommet::channel::<grommet::Envelope<AccountCall>>(32);
             let router = Arc::new(AccountRouter::<ManualClock>::new(vec![tx], clock.clone()));
             let mut cfg = ShardConfig::new([64, 8]);
             cfg.tick = Duration::from_millis(50);
