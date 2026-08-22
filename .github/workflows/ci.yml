@@ -62,6 +62,24 @@ jobs:
       # Doctests are not covered by `--all-targets`, so they are a separate run.
       - run: just doc-test
 
+  # The pure-Rust configuration, with hwloc opted out entirely.
+  #
+  # No libhwloc is installed and no cache is restored, so this job fails if
+  # anything in the default graph creeps back into the opt-out — which is the
+  # whole point of the feature. It also stands in for musl and air-gapped
+  # builds, neither of which can run the default.
+  no-topology:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-05-01
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
+      - run: just test-no-topology
+
   # The other half of the vendored-versus-system choice. Linking a system
   # libhwloc is what packagers and reproducible builds need, and it is not the
   # default, so nothing else would notice it breaking. It is also how macOS gets

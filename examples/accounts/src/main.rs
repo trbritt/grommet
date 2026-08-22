@@ -135,6 +135,11 @@ fn main() {
 
     let mut shard_config =
         ShardConfig::new([setting("GROMMET_MAX_IO", 2048), setting("GROMMET_MAX_COMPUTE", 64)]);
+    // These two compose: a shard queues up to GROMMET_MAILBOX items before the
+    // scheduler sees them, plus GROMMET_MAX_PENDING after, so the worst-case
+    // wait is their sum. The builder refuses a mailbox deeper than
+    // max_pending, since past that point most of the queue would sit where
+    // neither the pending gauge nor the admission gate can account for it.
     shard_config.scheduler.max_pending = setting("GROMMET_MAX_PENDING", 8192);
     shard_config.scheduler.queue_reserve = shard_config.scheduler.max_pending;
     shard_config.scheduler.evict_after = Duration::from_secs(60);

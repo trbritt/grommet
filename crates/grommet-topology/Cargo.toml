@@ -21,9 +21,20 @@ unexpected_cfgs = { level = "deny", check-cfg = ["cfg(coverage)"] }
 # The API floor is hwloc 2.8 (2022, packaged by every current distribution).
 # It is what unlocks the cpukinds ranking for hybrid parts, without demanding a
 # libhwloc newer than a stable server image is likely to carry.
-hwlocality = { version = "1.0.0-alpha.12", features = ["hwloc-2_8_0"] }
+hwlocality = { version = "1.0.0-alpha.12", features = ["hwloc-2_8_0"], optional = true }
 
 [features]
+# This crate exists to read the machine, so its own default reads the machine.
+# The crate above it (`grommet`) depends on it with `default-features = false`
+# and turns `hwloc` on only when its own `topology` feature is asked for, which
+# is what keeps a plain `cargo add grommet` free of a C build.
+default = ["hwloc", "vendored"]
+
+# Discovery and binding through libhwloc. Without it the crate still plans and
+# still exposes `Plan`, `ShardPlacement` and `Workload` — it just plans from
+# `available_parallelism` and binds nothing. See `fallback`.
+hwloc = ["dep:hwlocality"]
+
 # Building libhwloc from source is the default because linking a system one is
 # the less reliable path: `pkg-config` finds nothing on a stock macOS install,
 # and distribution packages lag the 2.8 API floor. A default that fails to
@@ -34,12 +45,12 @@ hwlocality = { version = "1.0.0-alpha.12", features = ["hwloc-2_8_0"] }
 # air-gapped. Turn it off with `default-features = false` to link the system
 # library instead — appropriate for distribution packaging, reproducible builds,
 # and any environment where the fetch is unacceptable.
-default = ["vendored"]
-
-vendored = ["hwlocality/vendored"]
+vendored = ["hwloc", "hwlocality/vendored"]
 
 # docs.rs has no network during the build, so the vendored libhwloc cannot be
 # compiled there. Documenting against a system library is what makes the docs
-# build at all.
+# build at all — and `hwloc` is named explicitly, because this crate documented
+# without it would describe the fallback rather than the crate.
 [package.metadata.docs.rs]
 no-default-features = true
+features = ["hwloc"]

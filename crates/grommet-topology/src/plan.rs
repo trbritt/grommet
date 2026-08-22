@@ -4,15 +4,21 @@
 //! which CPUs they get, and how the offload pool is split, from what the
 //! hardware actually is rather than from a fraction of a core count.
 //!
-//! The plan is computed directly from an [`hwlocality::Topology`], which can be
+//! The plan is computed directly from an `hwlocality::Topology`, which can be
 //! the live machine, a synthetic description, or an XML capture of somebody
 //! else's server — so every rule below is testable without owning the hardware.
 
+#[cfg(feature = "hwloc")]
 use crate::cgroup::Quota;
+#[cfg(feature = "hwloc")]
 use hwlocality::Topology;
+#[cfg(feature = "hwloc")]
 use hwlocality::cpu::cpuset::CpuSet;
+#[cfg(feature = "hwloc")]
 use hwlocality::object::TopologyObject;
+#[cfg(feature = "hwloc")]
 use hwlocality::object::types::ObjectType;
+#[cfg(feature = "hwloc")]
 use std::sync::Arc;
 
 /// What the workload looks like, which the caller knows and the hardware does
@@ -79,11 +85,14 @@ pub struct Plan {
     pub notes: Vec<String>,
     /// The machine this plan describes, kept so the plan can act on itself.
     ///
-    /// Binding is a call on a topology, and it has to happen on the thread being
-    /// placed — long after planning finished, on a thread that has no other way
-    /// to reach one. Re-reading the machine per thread would be both slower and
+    /// Binding is a call on a topology and has to happen on the thread being
+    /// placed — long after planning finished, on a thread with no other way to
+    /// reach one. Re-reading the machine per thread would be both slower and
     /// less trustworthy, since a second read can disagree with the first.
-    topology: Arc<Topology>,
+    /// Without hwloc there is nothing to bind through, so there is nothing to
+    /// keep.
+    #[cfg(feature = "hwloc")]
+    pub(crate) machine: Arc<Topology>,
 }
 
 impl Plan {
@@ -98,11 +107,13 @@ impl Plan {
     }
 
     /// The machine this plan was computed from.
+    #[cfg(feature = "hwloc")]
     pub fn topology(&self) -> &Topology {
-        &self.topology
+        &self.machine
     }
 }
 
+#[cfg(feature = "hwloc")]
 /// A physical core reduced to what placement needs.
 struct Core {
     pus: Vec<usize>,
@@ -114,11 +125,13 @@ struct Core {
 ///
 /// The topology is duplicated into the plan so that it can bind threads later.
 /// Use [`plan_shared`] when one is already shared, which avoids the copy.
+#[cfg(feature = "hwloc")]
 pub fn plan(topology: &Topology, workload: &Workload, quota: Option<Quota>) -> Plan {
     plan_shared(Arc::new(topology.clone()), workload, quota)
 }
 
 /// [`plan`], for a topology that is already shared.
+#[cfg(feature = "hwloc")]
 pub fn plan_shared(topology: Arc<Topology>, workload: &Workload, quota: Option<Quota>) -> Plan {
     let mut notes = Vec::new();
     let machine: &Topology = &topology;
@@ -216,9 +229,10 @@ pub fn plan_shared(topology: Arc<Topology>, workload: &Workload, quota: Option<Q
         );
     }
 
-    Plan { shards, offload, can_bind_cpu, can_bind_memory, notes, topology }
+    Plan { shards, offload, can_bind_cpu, can_bind_memory, notes, machine: topology }
 }
 
+#[cfg(feature = "hwloc")]
 fn numa_nodes(topology: &Topology) -> Vec<(usize, CpuSet)> {
     topology
         .objects_with_type(ObjectType::NUMANode)
@@ -230,6 +244,7 @@ fn numa_nodes(topology: &Topology) -> Vec<(usize, CpuSet)> {
 }
 
 /// The processing units hwloc ranks as most performant, on a hybrid machine.
+#[cfg(feature = "hwloc")]
 fn performance_cpus(topology: &Topology) -> Option<CpuSet> {
     let kinds: Vec<_> = topology.cpu_kinds().ok()?.collect();
     if kinds.len() < 2 {
@@ -245,6 +260,7 @@ fn performance_cpus(topology: &Topology) -> Option<CpuSet> {
     ))
 }
 
+#[cfg(feature = "hwloc")]
 fn physical_cores(
     topology: &Topology,
     allowed: &impl std::ops::Deref<Target = CpuSet>,
@@ -273,7 +289,7 @@ fn physical_cores(
     topology.objects_with_type(ObjectType::PU).filter_map(&describe).collect()
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "hwloc"))]
 mod tests {
     use super::*;
     use crate::cgroup::QuotaSource;

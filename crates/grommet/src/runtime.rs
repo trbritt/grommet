@@ -45,8 +45,9 @@ impl ShardContext {
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum BuildError {
-    /// [`PinPolicy::Require`] was set and these shard indices could not be
-    /// pinned.
+    /// `PinPolicy::Require` was set and these shard indices could not be
+    /// pinned. Only reachable with the `topology` feature, which is what makes
+    /// that variant exist.
     NotPinned(Vec<usize>),
     /// A shard thread died before it reported its placement.
     ShardFailed,
@@ -298,6 +299,10 @@ impl<P: Processor, C: Clock, const CLASSES: usize> Builder<P, C, CLASSES> {
             }
         }
 
+        // Without the `topology` feature there is no `Require` to compare
+        // against: a build that cannot bind a thread cannot be asked to insist
+        // that it did, and the compiler says so at the call site.
+        #[cfg(feature = "topology")]
         if self.pin == PinPolicy::Require && !unpinned.is_empty() {
             unpinned.sort_unstable();
             // Closing every mailbox tells the shards to drain and exit.

@@ -22,11 +22,14 @@ grommet = { workspace = true }
 grommet-core = { workspace = true }
 
 [features]
-default = ["vendored"]
+default = ["topology", "vendored"]
+
+# Hardware placement, through `grommet`. See that crate for the trade.
+topology = ["grommet/topology"]
 
 # Build libhwloc from source. See `grommet-topology` for why that is the
 # default and what it costs.
-vendored = ["grommet/vendored"]
+vendored = ["topology", "grommet/vendored"]
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "sync", "macros", "test-util", "time"] }
@@ -35,3 +38,4 @@ tokio = { version = "1", features = ["rt", "sync", "macros", "test-util", "time"
 # which a docs.rs build does not have.
 [package.metadata.docs.rs]
 no-default-features = true
+features = ["topology"]
