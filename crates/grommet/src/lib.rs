@@ -114,7 +114,7 @@ pub use mailbox::{Inbox, Mailbox, channel};
 pub use offload::{InlineOffload, Offload, OffloadError};
 pub use processor::{KeyOf, PanicPolicy, Processor};
 pub use respond::{Answer, Call, CallError, Cancelled, Responder};
-pub use router::{Router, SubmitError};
+pub use router::{BatchError, Router, SubmitError};
 pub use runtime::{BuildError, Builder, Runtime, ShardContext};
 pub use shard::ShardConfig;
 pub use topology::{PinPolicy, Plan, ShardPlacement, TopologyReport, Workload};

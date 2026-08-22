@@ -11,6 +11,7 @@ use crate::clock::{Clock, SystemClock};
 use crate::key::{ShardKey, mix};
 use crate::mailbox::{Mailbox, TrySendError};
 use crate::work::{Envelope, Work};
+use std::fmt;
 use std::time::Duration;
 
 /// Slots per shard. More slots mean finer future rebalancing and a smaller
@@ -51,6 +52,76 @@ impl<W> SubmitError<W> {
         }
     }
 }
+
+/// What a batch submission left undone.
+///
+/// A batch is not all-or-nothing: the items that landed are already being worked
+/// on and cannot be taken back, so the only honest report is which ones did not.
+/// Every rejected item comes back inside its [`SubmitError`], which means the caller still
+/// owns the work and can answer, retry or shed it — nothing is dropped on the
+/// caller's behalf.
+#[derive(Debug, PartialEq, Eq)]
+pub struct BatchError<W> {
+    submitted: usize,
+    rejected: Vec<SubmitError<W>>,
+}
+
+// A manual impl: the error is empty whatever `W` is, and a derive would demand
+// `W: Default` for no reason.
+impl<W> Default for BatchError<W> {
+    fn default() -> Self {
+        Self { submitted: 0, rejected: Vec::new() }
+    }
+}
+
+impl<W> BatchError<W> {
+    /// How many items of the batch were accepted.
+    pub fn submitted(&self) -> usize {
+        self.submitted
+    }
+
+    /// The items that were not, each with the reason it was refused.
+    pub fn rejected(&self) -> &[SubmitError<W>] {
+        &self.rejected
+    }
+
+    /// Take the rejected items, to answer or resubmit them.
+    pub fn into_rejected(self) -> Vec<SubmitError<W>> {
+        self.rejected
+    }
+
+    /// Take just the work back, for a caller that treats every rejection the
+    /// same way.
+    pub fn into_work(self) -> impl Iterator<Item = W> {
+        self.rejected.into_iter().map(SubmitError::into_work)
+    }
+
+    fn record(&mut self, outcome: Result<(), SubmitError<W>>) {
+        match outcome {
+            Ok(()) => self.submitted += 1,
+            Err(error) => self.rejected.push(error),
+        }
+    }
+
+    /// Nothing refused is not an error. The `Vec` never allocates on that
+    /// path, so a batch that lands whole costs no allocation at all.
+    fn into_result(self) -> Result<(), Self> {
+        if self.rejected.is_empty() { Ok(()) } else { Err(self) }
+    }
+}
+
+impl<W> fmt::Display for BatchError<W> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{} of {} submitted items were refused",
+            self.rejected.len(),
+            self.submitted + self.rejected.len()
+        )
+    }
+}
+
+impl<W: fmt::Debug> std::error::Error for BatchError<W> {}
 
 pub struct Router<W: Work, C: Clock = SystemClock, const CLASSES: usize = 2> {
     shards: Vec<Mailbox<Envelope<W>>>,
@@ -97,12 +168,8 @@ impl<W: Work, C: Clock, const CLASSES: usize> Router<W, C, CLASSES> {
     /// stops admitting, its mailbox fills, and this call suspends the caller
     /// rather than growing an unbounded queue.
     pub async fn submit(&self, work: W) -> Result<(), SubmitError<W>> {
-        let envelope = self.stamp(work)?;
-        let index = self.shard_index(envelope.key);
-        self.shards[index]
-            .send(envelope)
-            .await
-            .map_err(|closed| SubmitError::ShardDown(closed.into_inner().work))
+        let envelope = self.stamp(work, self.arrival())?;
+        self.send(envelope).await
     }
 
     /// Submit without ever waiting, reporting a full mailbox instead.
@@ -110,7 +177,76 @@ impl<W: Work, C: Clock, const CLASSES: usize> Router<W, C, CLASSES> {
     /// Use this when shedding load is better than queueing it, which is often
     /// true under a latency objective.
     pub fn try_submit(&self, work: W) -> Result<(), SubmitError<W>> {
-        let envelope = self.stamp(work)?;
+        let envelope = self.stamp(work, self.arrival())?;
+        self.try_send(envelope)
+    }
+
+    /// Submit many items, waiting on backpressure, and report everything that
+    /// did not land.
+    ///
+    /// Every item is attempted. One shard being unreachable does not stop
+    /// items bound for the others, so a batch spanning shards is not held
+    /// hostage by the worst of them.
+    ///
+    /// The whole batch shares one arrival stamp. That is not an approximation:
+    /// the caller held these items at one instant and handed them over at one
+    /// instant, so that instant is when they arrived. Queue-wait is measured
+    /// from it, and a deadline runs from it — including across a wait for
+    /// mailbox space, because that wait is queueing, which is exactly what a
+    /// deadline is meant to account for.
+    ///
+    /// # Errors
+    ///
+    /// [`BatchError`] carries every rejected item back with its reason, so a
+    /// caller can answer, retry or shed each one. Items not named there were
+    /// accepted.
+    pub async fn submit_batch<I>(&self, work: I) -> Result<(), BatchError<W>>
+    where
+        I: IntoIterator<Item = W>,
+    {
+        let arrival = self.arrival();
+        let mut batch = BatchError::default();
+        for item in work {
+            match self.stamp(item, arrival) {
+                Ok(envelope) => batch.record(self.send(envelope).await),
+                Err(error) => batch.rejected.push(error),
+            }
+        }
+        batch.into_result()
+    }
+
+    /// Submit many items without ever waiting, reporting everything that did
+    /// not land.
+    ///
+    /// The shedding counterpart of [`submit_batch`], and the one to reach for
+    /// under a latency objective: a full mailbox rejects that item and the
+    /// batch carries on rather than blocking behind it.
+    ///
+    /// [`submit_batch`]: Router::submit_batch
+    pub fn try_submit_batch<I>(&self, work: I) -> Result<(), BatchError<W>>
+    where
+        I: IntoIterator<Item = W>,
+    {
+        let arrival = self.arrival();
+        let mut batch = BatchError::default();
+        for item in work {
+            match self.stamp(item, arrival) {
+                Ok(envelope) => batch.record(self.try_send(envelope)),
+                Err(error) => batch.rejected.push(error),
+            }
+        }
+        batch.into_result()
+    }
+
+    async fn send(&self, envelope: Envelope<W>) -> Result<(), SubmitError<W>> {
+        let index = self.shard_index(envelope.key);
+        self.shards[index]
+            .send(envelope)
+            .await
+            .map_err(|closed| SubmitError::ShardDown(closed.into_inner().work))
+    }
+
+    fn try_send(&self, envelope: Envelope<W>) -> Result<(), SubmitError<W>> {
         let index = self.shard_index(envelope.key);
         match self.shards[index].try_send(envelope) {
             Ok(()) => Ok(()),
@@ -119,20 +255,28 @@ impl<W: Work, C: Clock, const CLASSES: usize> Router<W, C, CLASSES> {
         }
     }
 
-    fn stamp(&self, work: W) -> Result<Envelope<W>, SubmitError<W>> {
+    /// The arrival stamp for a submission, or `None` when stamping is off.
+    ///
+    /// Separated from [`Router::stamp`] so a batch can read the clock once and
+    /// spend that reading across every item, the way the reactor spends one
+    /// reading across a turn.
+    #[inline]
+    fn arrival(&self) -> Option<Duration> {
+        self.stamp_arrival.then(|| self.clock.now())
+    }
+
+    fn stamp(&self, work: W, arrival: Option<Duration>) -> Result<Envelope<W>, SubmitError<W>> {
         let class = work.class();
         if usize::from(class) >= CLASSES {
             return Err(SubmitError::InvalidClass(work));
         }
         let key = work.key();
-        let (enqueued, expires_at) = if self.stamp_arrival {
-            let now = self.clock.now();
-            (now, work.time_to_live().map(|ttl| now.saturating_add(ttl)))
-        } else {
+        let (enqueued, expires_at) = match arrival {
+            Some(now) => (now, work.time_to_live().map(|ttl| now.saturating_add(ttl))),
             // Without an arrival stamp a deadline would be measured from the
             // clock's origin, which would expire everything immediately, so it
             // is ignored rather than misapplied.
-            (Duration::ZERO, None)
+            None => (Duration::ZERO, None),
         };
         let request_id = work.request_id();
         Ok(Envelope { key, class, request_id, expires_at, enqueued, work })
@@ -192,6 +336,123 @@ mod tests {
             reached[shard] = true;
         }
         assert!(reached.into_iter().all(|hit| hit));
+    }
+
+    #[tokio::test]
+    async fn a_batch_reaches_every_shard_that_owns_one_of_its_keys() {
+        // Mailboxes deep enough for the whole batch: this is about where items
+        // land, and nothing is draining, so any backpressure here would just
+        // be the test deadlocking on itself.
+        let clock = ManualClock::new();
+        let (senders, mut receivers): (Vec<_>, Vec<_>) =
+            (0..4).map(|_| channel(64)).collect::<Vec<_>>().into_iter().unzip();
+        let router = Router::<Item, ManualClock, 2>::new(senders, clock);
+        let keys: Vec<u64> = (0..64).collect();
+        let expected: Vec<usize> = keys.iter().map(|key| router.shard_index(*key)).collect();
+
+        router.submit_batch(keys.iter().map(|key| Item::new(*key))).await.unwrap();
+
+        // Every item is where single submission would have put it: batching
+        // amortizes the submission, it does not re-route anything.
+        for (shard, receiver) in receivers.iter_mut().enumerate() {
+            let mut landed = Vec::new();
+            while let Ok(envelope) = receiver.try_recv() {
+                landed.push(envelope.key());
+            }
+            let want: Vec<u64> = keys
+                .iter()
+                .zip(&expected)
+                .filter(|(_, owner)| **owner == shard)
+                .map(|(key, _)| *key)
+                .collect();
+            assert_eq!(landed, want, "shard {shard} received the wrong items, or the wrong order");
+        }
+    }
+
+    #[tokio::test]
+    async fn one_batch_shares_one_arrival_stamp() {
+        let clock = ManualClock::new();
+        let (sender, mut receiver) = channel(8);
+        let router = Router::<Item, ManualClock, 2>::new(vec![sender], clock.clone());
+        clock.set(Duration::from_secs(3));
+
+        let ttl = Duration::from_millis(10);
+        let batch = (0..4).map(|key| Item { key, class: 0, ttl: Some(ttl) });
+        router.submit_batch(batch).await.unwrap();
+
+        // The caller held these at one instant and handed them over at one
+        // instant, so one instant is when they arrived. Reading the clock per
+        // item would also stagger their deadlines, which nothing asked for.
+        for _ in 0..4 {
+            let envelope = receiver.try_recv().expect("the batch landed");
+            assert_eq!(envelope.enqueued, Duration::from_secs(3));
+            assert_eq!(envelope.expires_at, Some(Duration::from_secs(3) + ttl));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_batch_hands_back_every_item_it_could_not_place() {
+        let (sender, mut receiver) = channel(2);
+        let router = Router::<Item, ManualClock, 2>::new(vec![sender], ManualClock::new());
+
+        // Two fit; one is refused for a bad class whatever the room; the rest
+        // overflow. Nothing may be silently dropped.
+        let batch = vec![
+            Item::new(1),
+            Item { key: 2, class: 9, ttl: None },
+            Item::new(3),
+            Item::new(4),
+            Item::new(5),
+        ];
+        let error = router.try_submit_batch(batch).expect_err("the mailbox holds two");
+
+        assert_eq!(error.submitted(), 2);
+        assert_eq!(error.rejected().len(), 3);
+        assert!(matches!(error.rejected()[0], SubmitError::InvalidClass(Item { key: 2, .. })));
+        assert!(matches!(error.rejected()[1], SubmitError::Full(Item { key: 4, .. })));
+        assert!(matches!(error.rejected()[2], SubmitError::Full(Item { key: 5, .. })));
+        assert!(error.to_string().contains("3 of 5"));
+
+        let returned: Vec<u64> = error.into_work().map(|item| item.key).collect();
+        assert_eq!(returned, vec![2, 4, 5], "the caller gets its own work back to answer");
+
+        let landed: Vec<u64> =
+            std::iter::from_fn(|| receiver.try_recv().ok()).map(|e| e.key()).collect();
+        assert_eq!(landed, vec![1, 3], "and exactly what was accepted was delivered");
+    }
+
+    #[tokio::test]
+    async fn one_unreachable_shard_does_not_strand_the_rest_of_a_batch() {
+        let clock = ManualClock::new();
+        let (first, mut receiver) = channel(8);
+        let (second, closed) = channel(8);
+        drop(closed);
+        let router = Router::<Item, ManualClock, 2>::new(vec![first, second], clock);
+
+        // Find a key each shard owns, so the batch genuinely spans both.
+        let alive =
+            (0..1000).find(|key| router.shard_index(*key) == 0).expect("shard 0 owns a key");
+        let gone = (0..1000).find(|key| router.shard_index(*key) == 1).expect("shard 1 owns a key");
+
+        let error = router
+            .submit_batch(vec![Item::new(gone), Item::new(alive)])
+            .await
+            .expect_err("one shard is gone");
+        assert_eq!(error.submitted(), 1);
+        assert!(matches!(error.rejected()[0], SubmitError::ShardDown(_)));
+        assert_eq!(
+            receiver.try_recv().map(|envelope| envelope.key()),
+            Ok(alive),
+            "the living shard is not held hostage by the dead one"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_empty_batch_is_accepted_and_does_nothing() {
+        let (router, mut receivers) = router(2);
+        router.submit_batch(Vec::<Item>::new()).await.unwrap();
+        router.try_submit_batch(Vec::<Item>::new()).unwrap();
+        assert!(receivers[0].try_recv().is_err());
     }
 
     #[tokio::test]
