@@ -77,6 +77,11 @@ pub struct ShardStats<const CLASSES: usize = 2> {
     pub pending: AtomicU64,
     pub resident: AtomicU64,
     pub evicting: AtomicU64,
+    /// Resident keys sitting idle, which is the eviction sweep's entire
+    /// worklist. It cannot exceed `resident`; an exporter that sees it climb
+    /// away from that bound is seeing a leak, which is why it is published
+    /// rather than left as an internal detail.
+    pub eviction_backlog: AtomicU64,
     pub queue_capacity: AtomicU64,
 }
 
@@ -99,6 +104,7 @@ impl<const CLASSES: usize> Default for ShardStats<CLASSES> {
             pending: AtomicU64::new(0),
             resident: AtomicU64::new(0),
             evicting: AtomicU64::new(0),
+            eviction_backlog: AtomicU64::new(0),
             queue_capacity: AtomicU64::new(0),
         }
     }
@@ -123,6 +129,7 @@ impl<const CLASSES: usize> ShardStats<CLASSES> {
         self.pending.store(snapshot.pending as u64, Relaxed);
         self.resident.store(snapshot.resident as u64, Relaxed);
         self.evicting.store(snapshot.evicting as u64, Relaxed);
+        self.eviction_backlog.store(snapshot.eviction_backlog as u64, Relaxed);
         self.queue_capacity.store(snapshot.queue_capacity as u64, Relaxed);
     }
 }
@@ -146,6 +153,7 @@ mod tests {
             pending: 13,
             resident: 5,
             evicting: 1,
+            eviction_backlog: 4,
             queue_capacity: 64,
         };
         let stats = ShardStats::<2>::default();
@@ -160,6 +168,7 @@ mod tests {
         assert_eq!(stats.pending.load(Relaxed), 13);
         assert_eq!(stats.resident.load(Relaxed), 5);
         assert_eq!(stats.evicting.load(Relaxed), 1);
+        assert_eq!(stats.eviction_backlog.load(Relaxed), 4);
         assert_eq!(stats.queue_capacity.load(Relaxed), 64);
     }
 }

@@ -188,6 +188,7 @@ mod tests {
     #[test]
     fn placement_is_stable_total_and_reaches_every_shard() {
         let (router, _receivers) = router(7);
+        assert_eq!(router.shards(), 7, "the fan-out a caller sizes its own sharding against");
         let mut reached = vec![false; 7];
         for key in 0..10_000 {
             let shard = router.shard_index(key);
@@ -206,12 +207,15 @@ mod tests {
         clock.set(Duration::from_secs(5));
 
         let ttl = Duration::from_millis(250);
-        router.submit(Item { key: 1, class: 0, ttl: Some(ttl) }).await.unwrap();
+        // Class 1 rather than 0: an envelope that lost the class on the way
+        // would still route to a real ring, just the wrong one, so the value
+        // has to differ from the default to be worth asserting.
+        router.submit(Item { key: 1, class: 1, ttl: Some(ttl) }).await.unwrap();
         let envelope = receiver.recv().await.unwrap();
         assert_eq!(envelope.enqueued, Duration::from_secs(5));
         assert_eq!(envelope.expires_at, Some(Duration::from_secs(5) + ttl));
         assert_eq!(envelope.key(), 1);
-        assert_eq!(envelope.class(), 0);
+        assert_eq!(envelope.class(), 1);
     }
 
     #[tokio::test]

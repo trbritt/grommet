@@ -287,4 +287,62 @@ mod tests {
         drop(receive);
         assert!(responder.is_cancelled(), "an abandoned call is worth detecting before working");
     }
+
+    #[test]
+    fn a_call_notices_the_abandonment_before_it_is_split() {
+        let (call, receive) = Call::<Job, u64>::new(Job { key: 1, ttl: None });
+        assert!(!call.is_cancelled(), "the caller is still waiting");
+        drop(receive);
+        assert!(
+            call.is_cancelled(),
+            "shedding an abandoned call is only possible if the wrapper reports it"
+        );
+    }
+
+    /// Work carrying values that are not the defaults for their types, so a
+    /// delegation that answered `Default::default()` instead of forwarding
+    /// would be visible.
+    #[derive(Debug, PartialEq, Eq)]
+    struct Tagged;
+
+    impl Work for Tagged {
+        type Key = u64;
+        type Id = u32;
+        fn key(&self) -> u64 {
+            77
+        }
+        fn request_id(&self) -> Option<u32> {
+            Some(5)
+        }
+        fn class(&self) -> ClassId {
+            1
+        }
+        fn time_to_live(&self) -> Option<Duration> {
+            Some(Duration::from_secs(3))
+        }
+    }
+
+    #[test]
+    fn wrapping_work_in_a_call_forwards_every_scheduling_answer_unchanged() {
+        let (call, _receive) = Call::<Tagged, u64>::new(Tagged);
+        assert_eq!(call.key(), 77);
+        assert_eq!(call.request_id(), Some(5));
+        assert_eq!(call.class(), 1, "a wrapped item must not be rerouted to another ring");
+        assert_eq!(call.time_to_live(), Some(Duration::from_secs(3)));
+        assert_eq!(call.work(), &Tagged);
+    }
+
+    #[test]
+    fn the_failure_types_say_which_of_the_two_things_went_wrong() {
+        assert_eq!(Cancelled.to_string(), "the call was dropped without a response");
+        assert_eq!(
+            CallError::<Job>::Cancelled.to_string(),
+            Cancelled.to_string(),
+            "a cancelled call reads the same however it is reported"
+        );
+        assert_eq!(
+            CallError::Rejected(SubmitError::Full(Job { key: 1, ttl: None })).to_string(),
+            "the call was not accepted",
+        );
+    }
 }

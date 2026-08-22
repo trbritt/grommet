@@ -67,7 +67,7 @@ fn scheduler(c: &mut Criterion) {
             let mut key = 0u64;
             b.iter(|| {
                 key = key.wrapping_add(1) % keys.max(1);
-                book.admit(Admit { key, class: 0, expires_at: None, payload: key }, Duration::ZERO);
+                book.admit(Admit { key, class: 0, expires_at: None, payload: key });
                 let dispatch = book.next(0, Duration::ZERO).expect("just admitted");
                 book.complete(
                     Completion {

@@ -127,7 +127,6 @@ fn admit_one<P: Processor, const CLASSES: usize>(
     processor: &P,
     hot: &ShardHot,
     envelope: Envelope<P::Work>,
-    now: Duration,
     coalesce: bool,
 ) {
     let Envelope { key, class, request_id, expires_at, enqueued, work } = envelope;
@@ -148,10 +147,12 @@ fn admit_one<P: Processor, const CLASSES: usize>(
     };
 
     hot.bump(&hot.started);
-    book.admit(
-        Admit { key, class, expires_at, payload: Stamped { enqueued, request_id: tracked, work } },
-        now,
-    );
+    book.admit(Admit {
+        key,
+        class,
+        expires_at,
+        payload: Stamped { enqueued, request_id: tracked, work },
+    });
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -162,10 +163,9 @@ fn admit_ready<P: Processor, const CLASSES: usize>(
     hot: &ShardHot,
     rx: &mut mpsc::Receiver<Envelope<P::Work>>,
     first: Envelope<P::Work>,
-    now: Duration,
     cfg: &ShardConfig<CLASSES>,
 ) {
-    admit_one::<P, CLASSES>(book, live, processor, hot, first, now, cfg.coalesce_duplicates);
+    admit_one::<P, CLASSES>(book, live, processor, hot, first, cfg.coalesce_duplicates);
     for _ in 1..cfg.admit_batch.max(1) {
         if book.is_saturated() {
             break;
@@ -173,7 +173,7 @@ fn admit_ready<P: Processor, const CLASSES: usize>(
         let Ok(envelope) = rx.try_recv() else {
             break;
         };
-        admit_one::<P, CLASSES>(book, live, processor, hot, envelope, now, cfg.coalesce_duplicates);
+        admit_one::<P, CLASSES>(book, live, processor, hot, envelope, cfg.coalesce_duplicates);
     }
 }
 
@@ -304,7 +304,6 @@ pub async fn run<P, C, const CLASSES: usize>(
                             &hot,
                             &mut rx,
                             envelope,
-                            at,
                             &cfg,
                         );
                         now = clock.now();

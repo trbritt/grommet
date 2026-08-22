@@ -255,3 +255,119 @@ impl SimWorld {
 pub fn revalue(account: &Account, params: &RevalueParams) -> i64 {
     heavy_revalue(account, params)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::Op;
+    use grommet::Processor as _;
+
+    const ACCOUNT: AccountId = 3;
+
+    /// These doubles are the specification every fault test is measured
+    /// against, so what they promise is worth checking directly rather than
+    /// only through the processor that consumes them.
+    // `SimStore::Session` is a unit — there is no pool to hold — so binding
+    // one reads as a unit binding. It is written this way so the tests still
+    // say how the port is meant to be used.
+    #[allow(clippy::let_unit_value)]
+    #[tokio::test]
+    async fn the_store_reads_back_what_it_committed() {
+        let store = SimStore::new(FaultPlan::off());
+        let mut session = store.acquire().await.expect("a healthy store hands out sessions");
+        assert_eq!(
+            store.load(&mut session, ACCOUNT).await.unwrap(),
+            Account::default(),
+            "an account nobody has touched reads as empty rather than missing"
+        );
+
+        let current = Account::default();
+        store
+            .commit(&mut session, RequestId::from(1u128), ACCOUNT, &current, Mutation::Delta(40))
+            .await
+            .expect("the commit applies");
+        assert_eq!(
+            store.load(&mut session, ACCOUNT).await.unwrap(),
+            Account { balance: 40, version: 1 },
+            "a load that ignored what was written would make every fault test vacuous"
+        );
+        assert_eq!(store.account(ACCOUNT), Account { balance: 40, version: 1 });
+    }
+
+    #[allow(clippy::let_unit_value)]
+    #[tokio::test]
+    async fn reusing_a_request_id_for_different_work_is_a_conflict() {
+        let store = SimStore::new(FaultPlan::off());
+        let mut session = store.acquire().await.unwrap();
+        let id = RequestId::from(7u128);
+        let empty = Account::default();
+        store
+            .commit(&mut session, id, ACCOUNT, &empty, Mutation::Delta(5))
+            .await
+            .expect("the first use of the id applies");
+        let applied = Account { balance: 5, version: 1 };
+
+        // Same id, same account, different mutation.
+        assert_eq!(
+            store.commit(&mut session, id, ACCOUNT, &applied, Mutation::Delta(6)).await,
+            Err(StoreError::RequestConflict),
+        );
+        // Same id, same mutation, different account.
+        assert_eq!(
+            store.commit(&mut session, id, ACCOUNT + 1, &empty, Mutation::Delta(5)).await,
+            Err(StoreError::RequestConflict),
+        );
+        // Either one alone is enough to conflict, so an exact replay — and only
+        // an exact replay — is recognised as the duplicate it is.
+        assert_eq!(
+            store.commit(&mut session, id, ACCOUNT, &applied, Mutation::Delta(5)).await,
+            Ok(CommitOutcome::Committed { account: applied, duplicate: true }),
+        );
+    }
+
+    #[tokio::test]
+    async fn the_cache_reads_back_what_it_stored_until_it_is_invalidated() {
+        let cache = SimCache::new(FaultPlan::off());
+        assert_eq!(cache.get(ACCOUNT).await.unwrap(), None, "a cold cache is a miss");
+
+        let account = Account { balance: 12, version: 4 };
+        cache.put(ACCOUNT, &account, Duration::from_secs(30)).await.unwrap();
+        assert_eq!(
+            cache.get(ACCOUNT).await.unwrap(),
+            Some(account),
+            "a cache that always missed would never exercise the resident path"
+        );
+
+        cache.invalidate(ACCOUNT).await.unwrap();
+        assert_eq!(cache.get(ACCOUNT).await.unwrap(), None);
+    }
+
+    #[test]
+    fn the_benchmark_entry_point_measures_the_same_calculation_the_service_runs() {
+        let account = Account { balance: 17, version: 2 };
+        let params = RevalueParams { scenarios: 1 };
+        assert_eq!(
+            revalue(&account, &params),
+            heavy_revalue(&account, &params),
+            "a benchmark measuring something else would report a number about nothing"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_world_wires_its_processor_to_the_same_doubles_it_exposes() {
+        let world = SimWorld::healthy();
+        let (call, reply) = crate::processor::AccountCall::new(crate::processor::Request {
+            req_id: RequestId::from(1u128),
+            account: ACCOUNT,
+            op: Op::Credit(25),
+        });
+        world.processor().process(ACCOUNT, None, call).await.expect("a healthy world commits");
+
+        assert_eq!(reply.await.unwrap(), crate::domain::Reply::Ok(25));
+        assert_eq!(
+            world.store.account(ACCOUNT),
+            Account { balance: 25, version: 1 },
+            "the world's store handle must be the one its processor writes through"
+        );
+    }
+}
