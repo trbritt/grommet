@@ -58,7 +58,7 @@
 //!
 //! ```
 //! use std::time::Duration;
-//! use timer_wheel::Wheel;
+//! use grommet_core::timer::Wheel;
 //!
 //! let mut wheel: Wheel<&'static str> = Wheel::with_capacity(128);
 //! wheel
