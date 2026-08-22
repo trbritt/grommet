@@ -9,10 +9,9 @@
 
 use crate::clock::{Clock, SystemClock};
 use crate::key::{ShardKey, mix};
+use crate::mailbox::{Mailbox, TrySendError};
 use crate::work::{Envelope, Work};
 use std::time::Duration;
-use tokio::sync::mpsc;
-use tokio::sync::mpsc::error::TrySendError;
 
 /// Slots per shard. More slots mean finer future rebalancing and a smaller
 /// worst-case imbalance when the shard count is not a power of two, at two
@@ -23,6 +22,7 @@ const SLOTS_PER_SHARD: usize = 64;
 /// the caller can shed it deliberately — answer the client, count it, or retry
 /// somewhere else — rather than discovering it was dropped.
 #[derive(Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum SubmitError<W> {
     /// The target shard's mailbox is full. Only [`Router::try_submit`] returns
     /// this; [`Router::submit`] waits instead, which is the backpressure path.
@@ -53,7 +53,7 @@ impl<W> SubmitError<W> {
 }
 
 pub struct Router<W: Work, C: Clock = SystemClock, const CLASSES: usize = 2> {
-    shards: Vec<mpsc::Sender<Envelope<W>>>,
+    shards: Vec<Mailbox<Envelope<W>>>,
     slots: Box<[u16]>,
     mask: u64,
     clock: C,
@@ -61,7 +61,7 @@ pub struct Router<W: Work, C: Clock = SystemClock, const CLASSES: usize = 2> {
 }
 
 impl<W: Work, C: Clock, const CLASSES: usize> Router<W, C, CLASSES> {
-    pub fn new(shards: Vec<mpsc::Sender<Envelope<W>>>, clock: C) -> Self {
+    pub fn new(shards: Vec<Mailbox<Envelope<W>>>, clock: C) -> Self {
         Self::with_options(shards, clock, true)
     }
 
@@ -69,11 +69,7 @@ impl<W: Work, C: Clock, const CLASSES: usize> Router<W, C, CLASSES> {
     /// powers queue-wait metrics and deadlines. Turning it off saves a clock
     /// read per submission — worth roughly a few percent of a core at millions
     /// of items per second — at the cost of both features.
-    pub fn with_options(
-        shards: Vec<mpsc::Sender<Envelope<W>>>,
-        clock: C,
-        stamp_arrival: bool,
-    ) -> Self {
+    pub fn with_options(shards: Vec<Mailbox<Envelope<W>>>, clock: C, stamp_arrival: bool) -> Self {
         assert!(!shards.is_empty(), "a router needs at least one shard");
         assert!(
             shards.len() <= usize::from(u16::MAX) + 1,
@@ -106,7 +102,7 @@ impl<W: Work, C: Clock, const CLASSES: usize> Router<W, C, CLASSES> {
         self.shards[index]
             .send(envelope)
             .await
-            .map_err(|error| SubmitError::ShardDown(error.0.work))
+            .map_err(|closed| SubmitError::ShardDown(closed.into_inner().work))
     }
 
     /// Submit without ever waiting, reporting a full mailbox instead.
@@ -147,6 +143,7 @@ impl<W: Work, C: Clock, const CLASSES: usize> Router<W, C, CLASSES> {
 mod tests {
     use super::*;
     use crate::clock::ManualClock;
+    use crate::mailbox::{Inbox, channel};
     use grommet_core::ClassId;
 
     #[derive(Debug)]
@@ -176,12 +173,10 @@ mod tests {
         }
     }
 
-    fn router(
-        shards: usize,
-    ) -> (Router<Item, ManualClock, 2>, Vec<mpsc::Receiver<Envelope<Item>>>) {
+    fn router(shards: usize) -> (Router<Item, ManualClock, 2>, Vec<Inbox<Envelope<Item>>>) {
         let clock = ManualClock::new();
         let (senders, receivers): (Vec<_>, Vec<_>) =
-            (0..shards).map(|_| mpsc::channel(4)).collect::<Vec<_>>().into_iter().unzip();
+            (0..shards).map(|_| channel(4)).collect::<Vec<_>>().into_iter().unzip();
         (Router::new(senders, clock), receivers)
     }
 
@@ -202,7 +197,7 @@ mod tests {
     #[tokio::test]
     async fn submission_stamps_arrival_and_deadline() {
         let clock = ManualClock::new();
-        let (sender, mut receiver) = mpsc::channel(4);
+        let (sender, mut receiver) = channel(4);
         let router = Router::<Item, ManualClock, 2>::new(vec![sender], clock.clone());
         clock.set(Duration::from_secs(5));
 
@@ -222,7 +217,7 @@ mod tests {
     async fn disabling_arrival_stamping_also_disables_deadlines() {
         let clock = ManualClock::new();
         clock.set(Duration::from_secs(5));
-        let (sender, mut receiver) = mpsc::channel(4);
+        let (sender, mut receiver) = channel(4);
         let router = Router::<Item, ManualClock, 2>::with_options(vec![sender], clock, false);
 
         router
@@ -255,7 +250,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_closed_shard_is_reported_by_both_submission_paths() {
-        let (sender, receiver) = mpsc::channel(1);
+        let (sender, receiver) = channel(1);
         drop(receiver);
         let router = Router::<Item, ManualClock, 2>::new(vec![sender], ManualClock::new());
 

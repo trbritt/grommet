@@ -53,7 +53,12 @@ pub type ClassId = u8;
 ///
 /// `max_inflight` is indexed by [`ClassId`]: each class dispatches into its own
 /// budget, so saturating one class never blocks another.
+///
+/// Build one with [`Config::new`] and adjust the fields you care about. The
+/// struct is `#[non_exhaustive]` so that a later release can add a limit
+/// without that being a breaking change for anyone who did exactly that.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Config<const CLASSES: usize = 2> {
     /// Maximum simultaneously dispatched items per class.
     pub max_inflight: [usize; CLASSES],

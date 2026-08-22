@@ -6,6 +6,7 @@
 
 use crate::clock::Clock;
 use crate::error::{Fallout, ProcessError};
+use crate::mailbox::Inbox;
 use crate::metrics::{ShardHot, ShardStats};
 use crate::processor::{KeyOf, PanicPolicy, Processor};
 use crate::work::{Envelope, Stamped, Work};
@@ -17,7 +18,6 @@ use grommet_core::{Admit, ClassId, Completion, Dispatch, Disposition, Scheduler}
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::mpsc;
 
 /// The scheduler as a shard specializes it.
 type Book<K, W, S, const CLASSES: usize> = Scheduler<K, Stamped<W>, S, CLASSES>;
@@ -25,7 +25,13 @@ type Book<K, W, S, const CLASSES: usize> = Scheduler<K, Stamped<W>, S, CLASSES>;
 /// Request ids currently queued or in flight, scoped by key.
 type Live<K, I> = AHashSet<(K, I)>;
 
+/// Per-shard tuning.
+///
+/// Build one with [`ShardConfig::new`] and adjust the fields you care about.
+/// The struct is `#[non_exhaustive]` so that later releases can add a knob
+/// without that being a breaking change for anyone who did exactly that.
 #[derive(Clone, Copy, Debug)]
+#[non_exhaustive]
 pub struct ShardConfig<const CLASSES: usize = 2> {
     pub scheduler: grommet_core::Config<CLASSES>,
     /// Maximum already-ready mailbox items admitted after one awaited receive.
@@ -161,7 +167,7 @@ fn admit_ready<P: Processor, const CLASSES: usize>(
     live: &mut Live<KeyOf<P>, <P::Work as Work>::Id>,
     processor: &P,
     hot: &ShardHot,
-    rx: &mut mpsc::Receiver<Envelope<P::Work>>,
+    rx: &mut Inbox<Envelope<P::Work>>,
     first: Envelope<P::Work>,
     cfg: &ShardConfig<CLASSES>,
 ) {
@@ -182,7 +188,7 @@ fn admit_ready<P: Processor, const CLASSES: usize>(
 /// The future is `!Send` by construction. Give it a current-thread runtime on a
 /// pinned core; [`crate::runtime`] does that for you.
 pub async fn run<P, C, const CLASSES: usize>(
-    mut rx: mpsc::Receiver<Envelope<P::Work>>,
+    mut rx: Inbox<Envelope<P::Work>>,
     processor: P,
     clock: C,
     stats: Arc<ShardStats<CLASSES>>,
@@ -471,7 +477,7 @@ mod tests {
         Fut: Future<Output = ()>,
     {
         let clock = ManualClock::new();
-        let (tx, rx) = mpsc::channel(64);
+        let (tx, rx) = crate::mailbox::channel(64);
         let router = Router::<Item, ManualClock, 2>::new(vec![tx], clock.clone());
         let stats = Arc::new(ShardStats::<2>::default());
         let engine = run(rx, processor, clock.clone(), stats.clone(), cfg);

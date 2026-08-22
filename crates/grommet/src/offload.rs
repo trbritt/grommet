@@ -9,6 +9,7 @@ use std::error::Error;
 use std::fmt;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum OffloadError {
     /// The pool is shutting down and will not accept work.
     Closed,

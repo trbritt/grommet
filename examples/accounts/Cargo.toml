@@ -63,7 +63,11 @@ vendored = ["grommet/vendored", "grommet-offload/vendored", "grommet-testkit/ven
 
 [dev-dependencies]
 bolero = "0.13"
-criterion = { version = "0.7", features = ["async_tokio"] }
+# CodSpeed's drop-in replacement for Criterion: identical API, and under
+# `cargo codspeed` it measures instructions rather than wall time, which is
+# what makes a shared CI runner a usable place to detect regressions.
+# A plain `cargo bench` still runs the ordinary walltime harness.
+criterion = { version = "5.0.1", package = "codspeed-criterion-compat", features = ["async_tokio"] }
 grommet-core = { workspace = true }
 bolero-generator = { version = "0.13", default-features = false }
 bytes = "1"

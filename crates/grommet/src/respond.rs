@@ -16,6 +16,8 @@ use grommet_core::ClassId;
 use std::error::Error;
 use std::fmt;
 use std::future::Future;
+use std::pin::Pin;
+use std::task::{Context, Poll};
 use std::time::Duration;
 use tokio::sync::oneshot;
 
@@ -33,6 +35,7 @@ impl Error for Cancelled {}
 
 /// Why a call did not produce a response.
 #[derive(Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum CallError<W> {
     /// Never accepted. The work is returned so the caller can shed it
     /// deliberately.
@@ -60,10 +63,11 @@ pub struct Call<W: Work, R> {
 }
 
 impl<W: Work, R> Call<W, R> {
-    /// Pair `work` with a fresh reply channel.
-    pub fn new(work: W) -> (Self, oneshot::Receiver<R>) {
+    /// Pair `work` with a fresh reply channel, returning the call to submit
+    /// and the [`Answer`] to await.
+    pub fn new(work: W) -> (Self, Answer<R>) {
         let (respond, receive) = oneshot::channel();
-        (Self { inner: work, respond }, receive)
+        (Self { inner: work, respond }, Answer(receive))
     }
 
     pub fn work(&self) -> &W {
@@ -109,6 +113,29 @@ impl<W: Work, R: Send + 'static> Work for Call<W, R> {
     }
 }
 
+/// The waiting half of a [`Call`]: a future resolving to the response, or to
+/// [`Cancelled`] when the work finished without one.
+///
+/// Awaiting this is the only thing it does. It exists so that the channel
+/// underneath can be replaced without changing what callers wrote.
+#[repr(transparent)]
+pub struct Answer<R>(oneshot::Receiver<R>);
+
+impl<R> Future for Answer<R> {
+    type Output = Result<R, Cancelled>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        // The receiver is `Unpin`, so this projection needs no `unsafe`.
+        Pin::new(&mut self.get_mut().0).poll(cx).map_err(|_| Cancelled)
+    }
+}
+
+impl<R> fmt::Debug for Answer<R> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Answer").finish_non_exhaustive()
+    }
+}
+
 /// The answering half of a [`Call`].
 pub struct Responder<R>(oneshot::Sender<R>);
 
@@ -138,7 +165,7 @@ where
         self.submit(call)
             .await
             .map_err(|error| CallError::Rejected(error.map(|call| call.inner)))?;
-        receive.await.map_err(|_| CallError::Cancelled)
+        receive.await.map_err(|Cancelled| CallError::Cancelled)
     }
 
     /// Submit without waiting, reporting a full mailbox immediately and
@@ -147,14 +174,10 @@ where
     /// Rejection is synchronous and the answer is not, which is exactly the
     /// shape a load-shedding caller needs: it can give up before committing to
     /// an await.
-    pub fn try_call(
-        &self,
-        work: W,
-    ) -> Result<impl Future<Output = Result<R, Cancelled>> + use<W, R, C, CLASSES>, SubmitError<W>>
-    {
+    pub fn try_call(&self, work: W) -> Result<Answer<R>, SubmitError<W>> {
         let (call, receive) = Call::new(work);
         self.try_submit(call).map_err(|error| error.map(|call| call.inner))?;
-        Ok(async move { receive.await.map_err(|_| Cancelled) })
+        Ok(receive)
     }
 }
 
@@ -162,12 +185,12 @@ where
 mod tests {
     use super::*;
     use crate::clock::ManualClock;
+    use crate::mailbox::channel;
     use crate::metrics::ShardStats;
     use crate::processor::Processor;
     use crate::shard::{self, ShardConfig};
     use grommet_core::Disposition;
     use std::sync::Arc;
-    use tokio::sync::mpsc;
 
     #[derive(Debug, PartialEq, Eq)]
     struct Job {
@@ -226,7 +249,7 @@ mod tests {
         Fut: Future<Output = ()>,
     {
         let clock = ManualClock::new();
-        let (tx, rx) = mpsc::channel(mailbox);
+        let (tx, rx) = channel(mailbox);
         let router = Arc::new(Router::new(vec![tx], clock.clone()));
         let stats = Arc::new(ShardStats::<2>::default());
         let mut cfg = ShardConfig::new([4, 4]);
@@ -256,7 +279,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn shed_work_is_returned_unwrapped_so_the_caller_can_answer_it() {
         let clock = ManualClock::new();
-        let (tx, _rx) = mpsc::channel(1);
+        let (tx, _rx) = channel(1);
         let router = Router::<Call<Job, u64>, ManualClock, 2>::new(vec![tx], clock);
 
         // Fill the one mailbox slot; nothing is consuming it.

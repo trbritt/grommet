@@ -41,6 +41,11 @@ panic         = "unwind"
 
 # Optimized, but with assertions and invariant checks left in. Deterministic
 # simulation runs under this.
+# Benchmarks keep their symbols: CodSpeed attributes instruction counts back to
+# source, and a stripped binary reports them against addresses instead.
+[profile.bench]
+debug = true
+
 [profile.sim]
 inherits = "release"
 debug-assertions = true
