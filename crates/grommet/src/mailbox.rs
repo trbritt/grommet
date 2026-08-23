@@ -99,6 +99,21 @@ impl<W> Inbox<W> {
         self.inner.recv().await
     }
 
+    /// Poll for the next item, registering the task's waker when none is
+    /// queued.
+    ///
+    /// Crate-private: this is the reactor's drain primitive, and the types in
+    /// its signature are `std::task`'s, so nothing of the substrate shows
+    /// through it. `Ready(None)` means every [`Mailbox`] is gone and the queue
+    /// is drained — the signal to stop admitting.
+    #[inline]
+    pub(crate) fn poll_recv(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<W>> {
+        self.inner.poll_recv(cx)
+    }
+
     /// Take an item that is already queued, without waiting.
     #[inline]
     pub fn try_recv(&mut self) -> Result<W, TryRecvError> {

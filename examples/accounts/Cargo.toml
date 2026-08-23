@@ -53,9 +53,16 @@ tonic-prost-build = "0.14"
 
 [features]
 # Bolero generators are on by default here: this crate exists to be tested.
-default = ["gen", "vendored"]
+default = ["driver-tokio", "gen", "vendored"]
 gen = ["dep:bolero-generator"]
 sim = ["dep:turmoil"]
+
+# Host the shard on a tokio runtime. See `grommet` for why this is permanent.
+driver-tokio = [
+    "grommet/driver-tokio",
+    "grommet-offload/driver-tokio",
+    "grommet-testkit/driver-tokio",
+]
 
 # Hardware placement. This example demonstrates it, so it is on by default;
 # `topology` without `vendored` links a system libhwloc instead of building one.

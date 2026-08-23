@@ -94,10 +94,13 @@
 #![deny(unsafe_code)]
 
 pub mod clock;
+pub(crate) mod driver;
 pub mod error;
 pub mod key;
 pub mod mailbox;
 pub mod metrics;
+pub(crate) mod outstanding;
+
 pub mod offload;
 pub mod processor;
 pub mod respond;
