@@ -2,7 +2,7 @@
 
 /// Exposes everything about a run that a repeat of the same run must reproduce.
 ///
-/// Implementing this is a *promise*, not a proof — the type system cannot see
+/// Implementing this is a *promise*, not a proof: the type system cannot see
 /// inside your processor and tell whether it read the wall clock, hashed a
 /// pointer, or iterated a `HashMap`. What it does is force you to say what
 /// "the same result" means for your workload, so

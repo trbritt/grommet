@@ -1,28 +1,35 @@
-//! Thread-per-core, key-affine work scheduling.
+//! A hardware-aware work scheduler: key-affine dispatch and CPU-bound offload,
+//! hosted on the async runtime you already use.
 //!
 //! Work carries an affine key. Every item for one key is handled by one shard,
 //! in submission order, one at a time, so the state behind that key needs no
 //! locking and no atomics: while an item is being processed it holds the only
-//! copy. Shards are pinned to cores, each running a single-threaded runtime.
+//! copy. Shards are pinned to cores chosen from the machine's own topology.
+//!
+//! Grommet does not drive futures. Polling IO, waking a socket and owning the
+//! thread belong to a host runtime, selected by a Cargo feature: `driver-tokio`
+//! gives each shard thread its own current-thread tokio runtime. A processor
+//! keeps using the database and HTTP clients it already has, and grommet adds
+//! affinity, fairness and offload above them.
 //!
 //! Within a shard, keys are dispatched round-robin from per-class ready rings,
 //! which bounds starvation strictly rather than statistically: a key at
 //! position `k` runs within `k` dispatches, no matter how much work a busier
 //! key has queued. Each class has its own in-flight budget, so saturating one
-//! class — CPU-bound work, a slow dependency — cannot starve another.
+//! class: CPU-bound work, a slow dependency: cannot starve another.
 //!
 //! # What you provide
 //!
-//! - [`Work`] — an item, its affine [`ShardKey`], its class, and optionally how
+//! - [`Work`]: an item, its affine [`ShardKey`], its class, and optionally how
 //!   long it stays worth doing.
-//! - [`Processor`] — what to do with an item, given the key's resident state.
+//! - [`Processor`]: what to do with an item, given the key's resident state.
 //! - Optionally an [`Offload`] pool for CPU-bound work, so a long computation
 //!   never stalls the shard core that submitted it.
 //!
 //! ```no_run
 //! use std::convert::Infallible;
 //! use std::time::Duration;
-//! use grommet::{Call, ClassId, Disposition, IO, Processor, Runtime, Work};
+//! use grommet::{Call, ClassId, Disposition, IO, Processor, Scheduler, Work};
 //!
 //! struct Job { account: u64, amount: i64, attempt: u128 }
 //!
@@ -60,7 +67,7 @@
 //! # async fn run() {
 //! // The clock defaults to `SystemClock` and the class count to the IO +
 //! // COMPUTE split, so the common case names neither.
-//! let runtime = Runtime::<Ledger>::builder(4, [2048, 64])
+//! let runtime = Scheduler::<Ledger>::builder(4, [2048, 64])
 //!     .spawn(|_shard| Ledger)
 //!     .expect("start shards");
 //!
@@ -87,7 +94,7 @@
 //! Work is `Send`, because it crosses once from the submitter to its shard.
 //! Nothing after that is: per-key state, processor futures and anything held
 //! across an await stay on one core. That is what makes `Rc` and `Cell` correct
-//! here, and it is also a real constraint — code written against `Send` futures
+//! here, and it is also a real constraint: code written against `Send` futures
 //! and work stealing will not fit. If you want that, use an ordinary
 //! multi-threaded executor; this crate is deliberately the other thing.
 
@@ -105,7 +112,7 @@ pub mod offload;
 pub mod processor;
 pub mod respond;
 pub mod router;
-pub mod runtime;
+pub mod scheduler;
 pub mod shard;
 pub mod topology;
 pub mod work;
@@ -118,9 +125,9 @@ pub use offload::{InlineOffload, Offload, OffloadError};
 pub use processor::{KeyOf, PanicPolicy, Processor};
 pub use respond::{Answer, Call, CallError, Cancelled, Responder};
 pub use router::{BatchError, Router, SubmitError};
-pub use runtime::{BuildError, Builder, Runtime, ShardContext};
+pub use scheduler::{BuildError, Builder, Scheduler, ShardContext};
 pub use shard::ShardConfig;
 pub use topology::{PinPolicy, Plan, ShardPlacement, TopologyReport, Workload};
 pub use work::{CLASSES, COMPUTE, Envelope, IO, Work};
 
-pub use grommet_core::{ClassId, Config as SchedulerConfig, Disposition, Snapshot};
+pub use grommet_core::{ClassId, Config as DispatchConfig, Disposition, Snapshot};

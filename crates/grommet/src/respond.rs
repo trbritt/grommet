@@ -6,8 +6,8 @@
 //!
 //! When a caller does want the result, wrap the work in a [`Call`] and use
 //! [`Router::call`]. The reply channel then travels with the work, which means
-//! every path that hands work back — a full mailbox, a downed shard, a passed
-//! deadline — hands back the means to answer the caller too.
+//! every path that hands work back: a full mailbox, a downed shard, a passed
+//! deadline: hands back the means to answer the caller too.
 
 use crate::clock::Clock;
 use crate::router::{Router, SubmitError};
@@ -40,7 +40,7 @@ pub enum CallError<W> {
     /// Never accepted. The work is returned so the caller can shed it
     /// deliberately.
     Rejected(SubmitError<W>),
-    /// Accepted, but the responder was dropped without an answer — the
+    /// Accepted, but the responder was dropped without an answer: the
     /// processor returned without replying, or its future panicked.
     Cancelled,
 }

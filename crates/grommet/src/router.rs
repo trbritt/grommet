@@ -2,7 +2,7 @@
 //!
 //! Routing goes through a slot table rather than hashing straight onto a shard
 //! index. The indirection costs one extra cached load and buys the ability to
-//! change which shard owns a slot without changing how keys hash — the
+//! change which shard owns a slot without changing how keys hash: the
 //! foundation for rebalancing a skewed workload later. Work stealing is not
 //! and never will be an option here, since it would break the guarantee that
 //! exactly one shard owns a key's state.
@@ -20,8 +20,8 @@ use std::time::Duration;
 const SLOTS_PER_SHARD: usize = 64;
 
 /// Why a submission did not reach a shard. Each variant hands the work back, so
-/// the caller can shed it deliberately — answer the client, count it, or retry
-/// somewhere else — rather than discovering it was dropped.
+/// the caller can shed it deliberately: answer the client, count it, or retry
+/// somewhere else: rather than discovering it was dropped.
 #[derive(Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum SubmitError<W> {
@@ -58,7 +58,7 @@ impl<W> SubmitError<W> {
 /// A batch is not all-or-nothing: the items that landed are already being worked
 /// on and cannot be taken back, so the only honest report is which ones did not.
 /// Every rejected item comes back inside its [`SubmitError`], which means the caller still
-/// owns the work and can answer, retry or shed it — nothing is dropped on the
+/// owns the work and can answer, retry or shed it: nothing is dropped on the
 /// caller's behalf.
 #[derive(Debug, PartialEq, Eq)]
 pub struct BatchError<W> {
@@ -138,8 +138,8 @@ impl<W: Work, C: Clock, const CLASSES: usize> Router<W, C, CLASSES> {
 
     /// `stamp_arrival` records a submission timestamp on every item, which
     /// powers queue-wait metrics and deadlines. Turning it off saves a clock
-    /// read per submission — worth roughly a few percent of a core at millions
-    /// of items per second — at the cost of both features.
+    /// read per submission: worth roughly a few percent of a core at millions
+    /// of items per second: at the cost of both features.
     pub fn with_options(shards: Vec<Mailbox<Envelope<W>>>, clock: C, stamp_arrival: bool) -> Self {
         assert!(!shards.is_empty(), "a router needs at least one shard");
         assert!(
@@ -191,7 +191,7 @@ impl<W: Work, C: Clock, const CLASSES: usize> Router<W, C, CLASSES> {
     /// The whole batch shares one arrival stamp. That is not an approximation:
     /// the caller held these items at one instant and handed them over at one
     /// instant, so that instant is when they arrived. Queue-wait is measured
-    /// from it, and a deadline runs from it — including across a wait for
+    /// from it, and a deadline runs from it: including across a wait for
     /// mailbox space, because that wait is queueing, which is exactly what a
     /// deadline is meant to account for.
     ///

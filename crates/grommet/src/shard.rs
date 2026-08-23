@@ -60,7 +60,7 @@ pub struct ShardConfig<const CLASSES: usize = 2> {
     /// batch shares one clock reading and one pass of the loop's bookkeeping
     /// across everything already finished.
     ///
-    /// It is a cap, not a target — harvesting stops as soon as nothing else is
+    /// It is a cap, not a target: harvesting stops as soon as nothing else is
     /// ready. The cap is what keeps a steady stream of completions from
     /// starving the other arms of the loop, exactly as `admit_batch` keeps a
     /// producer from starving them.
@@ -177,8 +177,8 @@ fn admit_one<P: Processor, const CLASSES: usize>(
     let Envelope { key, class, request_id, expires_at, enqueued, work } = envelope;
 
     // Suppress a retry that arrived while its original is still outstanding.
-    // The index is keyed by (key, id) so an id reused across different keys —
-    // legitimate in some schemes — is never confused for a duplicate.
+    // The index is keyed by (key, id), so an id reused across different keys
+    // (legitimate in some schemes) is never confused for a duplicate.
     let tracked = match request_id {
         Some(id) if coalesce => {
             if !live.insert((key, id.clone())) {
@@ -292,7 +292,7 @@ fn begin_flushes<P, F>(
 /// Popping rather than awaiting a receive: nothing compound is built and
 /// nothing is dropped part-polled, so the cancel safety a `select!` would have
 /// leaned on is not a question that arises. `waker` is whatever should be
-/// notified when the mailbox is empty — the task, or the sleeping thread.
+/// notified when the mailbox is empty: the task, or the sleeping thread.
 fn drain_inbox<P: Processor, C: Clock, const CLASSES: usize>(
     rx: &mut Inbox<Envelope<P::Work>>,
     book: &mut Book<KeyOf<P>, P::Work, P::State, CLASSES>,
@@ -418,7 +418,7 @@ fn service_timers<P: Processor, C: Clock, const CLASSES: usize>(
 /// Run one shard until its mailbox closes and everything outstanding drains.
 ///
 /// The future is `!Send` by construction. Give it a current-thread runtime on a
-/// pinned core; [`crate::runtime`] does that for you.
+/// pinned core; [`crate::scheduler`] does that for you.
 pub async fn run<P, C, const CLASSES: usize>(
     mut rx: Inbox<Envelope<P::Work>>,
     processor: P,
@@ -438,7 +438,7 @@ pub async fn run<P, C, const CLASSES: usize>(
     // accounting bug, and the set says so rather than growing.
     let capacity: usize =
         cfg.scheduler.max_inflight.iter().sum::<usize>().saturating_add(cfg.flush_slots);
-    // The element type is the `Either` of the two futures pushed below — one
+    // The element type is the `Either` of the two futures pushed below: one
     // concrete type per processor, inferred rather than named because an
     // `async fn`'s future has no nameable type. That is what keeps the set a
     // flat slab with no dynamic dispatch anywhere.
@@ -446,7 +446,7 @@ pub async fn run<P, C, const CLASSES: usize>(
 
     // Where a sweep hands its candidates back, reused across sweeps so the
     // steady state allocates nothing. It doubles as the queue for anything the
-    // flush budget could not take yet — a sweep may return more candidates than
+    // flush budget could not take yet. A sweep may return more candidates than
     // there are slots, and draining from the front keeps them in the
     // least-recently-idle order the scheduler chose. A key waiting here is
     // already quiesced, so nothing dispatches for it meanwhile.
@@ -463,7 +463,7 @@ pub async fn run<P, C, const CLASSES: usize>(
     // Carried across turns rather than re-read at the top of each. The reading
     // taken at the end of one turn's bookkeeping and the one that would be taken
     // at the start of the next are separated by nothing but the loop back-edge,
-    // and `Instant::now` is a real syscall-shaped cost — around 25ns, against a
+    // and `Instant::now` is a real syscall-shaped cost, around 25ns against a
     // hot path measured in hundreds.
     let mut now = clock.now();
 
@@ -485,7 +485,7 @@ pub async fn run<P, C, const CLASSES: usize>(
         // Once per wake, not once per turn. Within a turn the reading is
         // carried and refreshed only after work, because `Clock::now` is a real
         // syscall-shaped cost against a hot path measured in hundreds of
-        // nanoseconds. But arriving here means something happened — and if that
+        // nanoseconds. Arriving here means something happened, and if that
         // something was the wheel's own deadline, a stale reading would find
         // nothing due and arm the same wait again, forever.
         now = clock.now();
@@ -508,7 +508,7 @@ pub async fn run<P, C, const CLASSES: usize>(
             // Closed mailbox and nothing left in flight: everything queued has
             // already been dispatched and harvested.
             if !open && outstanding.is_empty() && staged.is_empty() {
-                // Resident state is a write-back cache — between dispatches the
+                // Resident state is a write-back cache: between dispatches the
                 // scheduler holds the only copy. Exiting without draining it
                 // discards writes the processor was told it could keep, so the
                 // last thing a shard does is hand every one of them to
@@ -871,7 +871,7 @@ mod tests {
         cfg.coalesce_duplicates = true;
 
         drive(processor, cfg, |router, _clock| async move {
-            // Shed at dispatch, so this id never reaches a completion — the
+            // Shed at dispatch, so this id never reaches a completion, which is the
             // only other place the coalescing index is cleared.
             router.try_submit(Item { ttl: Some(Duration::ZERO), ..Item::retry(3, 77) }).unwrap();
             tokio::time::sleep(Duration::from_millis(5)).await;
@@ -895,7 +895,7 @@ mod tests {
     /// Not that it produces one fixed interleaving: the cap decides how many
     /// slots a pass visits, so it necessarily changes which keys advance
     /// together, and both a rotation of one and a rotation of many are fair.
-    /// What may never change is the contract — every item processed exactly
+    /// What may never change is the contract: every item processed exactly
     /// once, and each key's own items in the order they were submitted.
     #[tokio::test(start_paused = true)]
     async fn the_completion_batch_size_changes_no_obligation_of_the_shard() {
@@ -1046,7 +1046,7 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(5)).await;
 
             // The original has completed and released its id, so this one is
-            // a fresh operation as far as the runtime can tell — answering it
+            // a fresh operation as far as the scheduler can tell, so answering it
             // correctly is the store's job, not the scheduler's.
             router.submit(Item::retry(3, 77)).await.unwrap();
         })

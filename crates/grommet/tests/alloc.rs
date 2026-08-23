@@ -1,17 +1,14 @@
 //! What one dispatch costs the allocator once a shard is warm.
 //!
-//! The interesting number is the *marginal* one. A shard allocates plenty at
-//! startup — its scheduler slab, its key map, its outstanding set — and a test
-//! that counted from zero would report mostly that. So the same workload runs
-//! twice at different sizes and the difference is divided by the difference in
-//! items: fixed costs cancel, and what is left is what each additional dispatch
-//! actually cost.
+//! The interesting number is the marginal one. A shard allocates plenty at
+//! startup: its dispatch slab, its key map, its outstanding set. A test that
+//! counted from zero would report mostly that. So the same workload runs twice
+//! at different sizes and the difference is divided by the difference in items.
+//! Fixed costs cancel, and what remains is what each additional dispatch cost.
 //!
-//! The number this pins is the one that decided the outstanding set's design.
-//! Measured against `futures`' unordered set, the same workload cost 1.008
-//! allocations per dispatch — one heap node per pushed future, exactly as that
-//! structure documents. The slab reuses its slots, so what is left here is
-//! warm-up amortizing away and nothing else.
+//! The outstanding set boxes a slot the first time that slot is used and reuses
+//! it forever after, so a warm shard should allocate nothing at all to
+//! dispatch. That is what this holds it to.
 
 use grommet::metrics::ShardStats;
 use grommet::{Disposition, ManualClock, Processor, Router, ShardConfig, Work, shard};
@@ -24,8 +21,8 @@ static COUNTING: AtomicBool = AtomicBool::new(false);
 
 /// Counts allocations while armed, and is otherwise the system allocator.
 ///
-/// Gated rather than always-on so that the harness around the measurement —
-/// building the runtime, collecting results — cannot contribute to it.
+/// Gated rather than always-on, so that the harness around the measurement
+/// (building the host runtime, collecting results) cannot contribute to it.
 struct Counting;
 
 unsafe impl GlobalAlloc for Counting {
@@ -138,11 +135,10 @@ fn a_warm_shard_allocates_nothing_to_dispatch() {
          -> {marginal:.3} per dispatch"
     );
 
-    // Submission itself allocates nothing per item — the mailbox is bounded and
-    // pre-sized, and the scheduler's slab is reserved above — so anything left
-    // belongs to the set holding the dispatched future. It boxes a slot the
-    // first time that slot is used and reuses it through `Pin::set` forever
-    // after, which is the claim the whole structure exists to make.
+    // Submission itself allocates nothing per item: the mailbox is bounded and
+    // pre-sized, and the dispatch slab is reserved above. So anything left
+    // belongs to the set holding the dispatched future, which reuses its slots
+    // through `Pin::set` rather than allocating one per dispatch.
     assert!(
         marginal < 0.05,
         "a warm shard allocated {marginal:.3} times per dispatch; slots must be reused"

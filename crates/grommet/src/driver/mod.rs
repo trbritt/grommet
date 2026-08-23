@@ -1,31 +1,22 @@
-//! What the reactor needs from whatever hosts it.
+//! The host runtime a shard's scheduler runs on.
 //!
-//! A shard decides *when* it next needs to run: its timer wheel computes that
-//! from the caller's [`Clock`], and nothing here participates in the decision.
-//! What lives behind this seam is only the waiting — and the waiting is the one
-//! part of the loop that cannot be written once for every deployment.
+//! Grommet schedules work; it does not drive futures. Something has to own the
+//! thread, poll the IO a processor performs, and decide how to wait when there
+//! is nothing to do, and that something is an async runtime the caller already
+//! uses. A `Driver` is the small surface grommet needs from one.
 //!
-//! Today a shard runs as a future on a current-thread tokio runtime, because
-//! its processors do their IO there: a PostgreSQL query, a Redis round trip,
-//! an outbound HTTP request. That runtime's reactor only runs while the shard's
-//! task is suspended, so the shard has to suspend rather than sleep. Once a
-//! shard owns its IO driver it owns its wait too, and the same loop blocks in
-//! `io_uring_enter` or `epoll_wait` with the wheel's deadline as the timeout.
+//! The division is deliberate. A runtime knows how to wake a future when its
+//! socket becomes readable; it does not know that two items sharing an affine
+//! key must never run at once, or that compute belongs on a different core from
+//! the reactor that dispatched it. Grommet supplies that and borrows the rest,
+//! which is why adopting it does not mean leaving tokio.
 //!
-//! Both shapes fit [`Driver::wait`], which is why the loop above it never has to
-//! know which one it has:
+//! One driver is compiled in, chosen by a Cargo feature, and the shard loop is
+//! the same across all of them. Each shard thread gets its own host instance,
+//! placed on the CPU the topology plan chose for it.
 //!
-//! - **Suspending** ([`Poll::Pending`]) hands the thread back so a host runtime
-//!   can drive whatever else is on it. The wake comes from the mailbox, from a
-//!   completion, or from the timer the driver armed.
-//! - **Blocking** ([`Poll::Ready`]) waits in place and returns for another turn.
-//!   Only an owned driver may do this: a future that blocks its thread starves
-//!   whatever shares it, which is why the hosted driver cannot.
-//!
-//! The trait is crate-private, so which driver a build has is never part of the
-//! public API — only of the Cargo features that select it.
-//!
-//! [`Clock`]: crate::clock::Clock
+//! The trait is crate-private, so which runtime a build hosts on is expressed
+//! by its features rather than by its public API.
 
 use std::task::{Context, Poll};
 use std::time::Duration;
@@ -43,18 +34,18 @@ pub(crate) mod tokio;
 pub(crate) trait Driver {
     /// Wait until something wakes this shard, or until `deadline` passes.
     ///
-    /// `now` is the reactor's own reading of its clock, so a driver that needs a
+    /// `now` is the scheduler's own reading of its clock, so a driver needing a
     /// relative timeout can compute one without taking a second reading that
     /// would disagree with the schedule it was given. `None` means nothing is
     /// scheduled and only a wake will do.
     ///
-    /// Returning [`Poll::Ready`] promises the caller may take another turn
-    /// immediately; returning [`Poll::Pending`] promises `cx`'s waker has been
-    /// registered with everything that could end the wait.
+    /// [`Poll::Ready`] promises the caller may take another turn immediately.
+    /// [`Poll::Pending`] promises `cx`'s waker is registered with everything
+    /// that could end the wait.
     fn wait(&mut self, deadline: Option<Duration>, now: Duration, cx: &mut Context<'_>)
     -> Poll<()>;
 }
 
-/// The driver this build was compiled with.
+/// The host this build was compiled against.
 #[cfg(feature = "driver-tokio")]
 pub(crate) type Host = tokio::TokioDriver;

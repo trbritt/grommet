@@ -9,7 +9,7 @@
 //! and the offload pool while requests are in flight. That is deliberate. A
 //! feedback loop over placement would be a second scheduler sitting above the
 //! first, with its own oscillation, its own warm-up and its own failure mode
-//! under exactly the load spike where you least want to find out about it — and
+//! under exactly the load spike where you least want to find out about it, and
 //! re-binding a thread throws away the cache and NUMA locality that pinning it
 //! was for.
 //!
@@ -31,7 +31,7 @@
 //! - `reactor_busy` is a **lower bound** on reactor CPU demand, not the demand.
 //!   It counts scheduling bookkeeping only; a processor doing its own work
 //!   inline is invisible to it. Recommendations therefore lean towards giving
-//!   compute slightly more than it needs, which is the safer direction — the
+//!   compute slightly more than it needs, which is the safer direction: the
 //!   reactors degrade gracefully under a shortfall, and a starved offload pool
 //!   blocks them outright.
 
@@ -183,7 +183,7 @@ impl fmt::Display for Advice {
         };
         write!(
             f,
-            "calibration: {action} — compute {:.2} cores served, {:.2} blocked, \
+            "calibration: {action}: compute {:.2} cores served, {:.2} blocked, \
              pool {:.0}% busy, reactor overhead {:.2} cores; \
              compute_fraction = {:.2}",
             self.compute_cores,

@@ -199,7 +199,7 @@ async fn an_old_duplicate_cannot_regress_newer_state() {
     assert_eq!(state, Some(Account { balance: 30, version: 3 }));
 
     // Replaying the oldest id returns its historical balance, but must not roll
-    // the resident snapshot back to it — that would livelock the missing id 2
+    // the resident snapshot back to it: that would livelock the missing id 2
     // behind version conflicts forever.
     let (reply, outcome) = run(&world, state, 1, Op::Credit(10)).await;
     assert_eq!(reply, Reply::Duplicate(10));
@@ -258,7 +258,7 @@ async fn a_duplicate_newer_than_our_snapshot_replaces_it() {
     assert_eq!(resident(&second), Some(Account { balance: 20, version: 2 }));
 
     // Replay id 2 while holding the *older* version-1 snapshot. The recorded
-    // outcome is ahead of what we hold, so it is the one to keep — holding on
+    // outcome is ahead of what we hold, so it is the one to keep: holding on
     // to the stale snapshot would send the next request into a version
     // conflict it can never win.
     let (reply, outcome) = run(&world, Some(stale), 2, Op::Credit(10)).await;

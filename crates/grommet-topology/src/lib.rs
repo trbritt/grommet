@@ -7,7 +7,7 @@
 //!
 //! Discovery is libhwloc, unmodified and unwrapped. It already knows the cache
 //! hierarchy, NUMA distances, Windows processor groups and the cpukinds ranking
-//! for hybrid parts, so there is no local model to drift from it — `plan()`
+//! for hybrid parts, so there is no local model to drift from it: `plan()`
 //! reads an `hwlocality::Topology` directly.
 //!
 //! Two things hwloc does not answer are supplied here:
@@ -29,7 +29,7 @@
 //!
 //! The plan is then applied by the threads it describes, each binding itself as
 //! it starts (see [`bind`]), and the split it chose can be checked against what
-//! the workload turned out to need (see [`calibrate`]) — offline, as a
+//! the workload turned out to need (see [`calibrate`]): offline, as a
 //! configuration change, never as a live adjustment.
 //!
 //! # Testing without the hardware
@@ -44,7 +44,7 @@
 //! true. Turning it off replaces discovery with `fallback::detect`, which
 //! plans from [`std::thread::available_parallelism`] alone: one memory node,
 //! no SMT knowledge, and no binding. Every type here stays, so code that plans
-//! and starts a runtime compiles either way — it simply gets a layout that
+//! and starts a runtime compiles either way: it simply gets a layout that
 //! admits it is guessing.
 
 #![deny(unsafe_code)]

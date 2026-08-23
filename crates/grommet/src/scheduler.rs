@@ -1,4 +1,10 @@
-//! Building and owning a set of pinned shards.
+//! Placing shards on the machine and owning the threads that run them.
+//!
+//! This is where the topology plan becomes threads. Each shard gets one core,
+//! one host runtime built on that core after binding, and one scheduler running
+//! on it. The host is chosen by a Cargo feature and is what drives whatever IO
+//! the processor performs; grommet's part is deciding what runs where and in
+//! what order.
 
 use crate::clock::{Clock, SystemClock};
 use crate::mailbox;
@@ -16,7 +22,7 @@ use std::thread::JoinHandle;
 ///
 /// This is what makes core-local resources possible: the factory runs on the
 /// shard's own thread, after it has been placed, so it can size a connection
-/// pool per core and — given [`node`] — pick the offload pool and allocations
+/// pool per core and: given [`node`]: pick the offload pool and allocations
 /// that are local to the memory it will be touching.
 ///
 /// [`node`]: ShardContext::node
@@ -116,7 +122,7 @@ impl<P: Processor, const CLASSES: usize> Builder<P, SystemClock, CLASSES> {
 
 impl<P: Processor, C: Clock, const CLASSES: usize> Builder<P, C, CLASSES> {
     pub fn with_clock(shards: usize, max_inflight: [usize; CLASSES], clock: C) -> Self {
-        assert!(shards > 0, "a runtime needs at least one shard");
+        assert!(shards > 0, "a scheduler needs at least one shard");
         Self {
             shards,
             mailbox: 1024,
@@ -192,10 +198,10 @@ impl<P: Processor, C: Clock, const CLASSES: usize> Builder<P, C, CLASSES> {
 
     /// Start every shard, building one processor per shard on its own thread.
     ///
-    /// The factory runs inside the shard's runtime, which is what lets each
-    /// shard own core-local resources — connection pools, caches, buffers —
+    /// The factory runs inside the shard's host runtime, which is what lets each
+    /// shard own core-local resources: connection pools, caches, buffers,
     /// rather than sharing one set across cores.
-    pub fn spawn<F>(self, factory: F) -> Result<Runtime<P, C, CLASSES>, BuildError>
+    pub fn spawn<F>(self, factory: F) -> Result<Scheduler<P, C, CLASSES>, BuildError>
     where
         F: Fn(&ShardContext) -> P + Send + Sync + 'static,
     {
@@ -210,7 +216,7 @@ impl<P: Processor, C: Clock, const CLASSES: usize> Builder<P, C, CLASSES> {
         }
 
         // Reading the machine is deferred to here rather than done in `new`, so
-        // that a runtime which never starts never pays for it, and so a caller
+        // that a scheduler which never starts never pays for it, and so a caller
         // who supplies a plan never reads the machine twice.
         let plan = match (self.plan, self.pin) {
             (plan @ Some(_), _) => plan,
@@ -256,7 +262,7 @@ impl<P: Processor, C: Clock, const CLASSES: usize> Builder<P, C, CLASSES> {
                     .spawn(move || {
                         // Bind first. Memory binding only governs pages touched
                         // afterwards, and everything this thread allocates from
-                        // here on — the runtime, the processor, the key states —
+                        // here on: the host, the processor, the key states,
                         // should come from its own node.
                         let bound = match (policy, placement, &plan) {
                             (PinPolicy::Disabled, _, _) | (_, None, _) | (_, _, None) => {
@@ -313,7 +319,7 @@ impl<P: Processor, C: Clock, const CLASSES: usize> Builder<P, C, CLASSES> {
             return Err(BuildError::NotPinned(unpinned));
         }
 
-        Ok(Runtime {
+        Ok(Scheduler {
             router: Some(Arc::new(Router::with_options(senders, self.clock, self.stamp_arrival))),
             workers,
             stats,
@@ -330,15 +336,15 @@ impl<P: Processor, C: Clock, const CLASSES: usize> Builder<P, C, CLASSES> {
 
 /// A running set of shards. Dropping it closes every mailbox and waits for the
 /// shards to drain.
-pub struct Runtime<P: Processor, C: Clock = SystemClock, const CLASSES: usize = 2> {
+pub struct Scheduler<P: Processor, C: Clock = SystemClock, const CLASSES: usize = 2> {
     router: Option<Arc<Router<P::Work, C, CLASSES>>>,
     workers: Vec<JoinHandle<()>>,
     stats: Vec<Arc<ShardStats<CLASSES>>>,
     report: TopologyReport,
 }
 
-impl<P: Processor, const CLASSES: usize> Runtime<P, SystemClock, CLASSES> {
-    /// Start configuring a runtime on the system clock. Use
+impl<P: Processor, const CLASSES: usize> Scheduler<P, SystemClock, CLASSES> {
+    /// Start configuring a scheduler on the system clock. Use
     /// [`Builder::with_clock`] directly for a different one.
     pub fn builder(
         shards: usize,
@@ -347,7 +353,7 @@ impl<P: Processor, const CLASSES: usize> Runtime<P, SystemClock, CLASSES> {
         Builder::new(shards, max_inflight)
     }
 
-    /// Start configuring a runtime laid out by `plan`, one shard per placement.
+    /// Start configuring a scheduler laid out by `plan`, one shard per placement.
     pub fn for_plan(
         plan: Arc<Plan>,
         max_inflight: [usize; CLASSES],
@@ -356,7 +362,7 @@ impl<P: Processor, const CLASSES: usize> Runtime<P, SystemClock, CLASSES> {
     }
 }
 
-impl<P: Processor, C: Clock, const CLASSES: usize> Runtime<P, C, CLASSES> {
+impl<P: Processor, C: Clock, const CLASSES: usize> Scheduler<P, C, CLASSES> {
     pub fn router(&self) -> &Arc<Router<P::Work, C, CLASSES>> {
         self.router.as_ref().expect("router is present until shutdown")
     }
@@ -385,7 +391,7 @@ impl<P: Processor, C: Clock, const CLASSES: usize> Runtime<P, C, CLASSES> {
     }
 }
 
-impl<P: Processor, C: Clock, const CLASSES: usize> Drop for Runtime<P, C, CLASSES> {
+impl<P: Processor, C: Clock, const CLASSES: usize> Drop for Scheduler<P, C, CLASSES> {
     fn drop(&mut self) {
         self.close();
     }
@@ -460,7 +466,7 @@ mod tests {
     fn a_mailbox_deeper_than_the_scheduler_is_refused_before_anything_starts() {
         let mut config = ShardConfig::new([4, 4]);
         config.scheduler.max_pending = 16;
-        let error = Runtime::<Counter>::builder(1, [4, 4])
+        let error = Scheduler::<Counter>::builder(1, [4, 4])
             .pin(PinPolicy::Disabled)
             .shard_config(config)
             .mailbox(64)
@@ -480,7 +486,7 @@ mod tests {
     fn queue_depth_is_the_mailbox_and_the_scheduler_together() {
         let mut config = ShardConfig::<2>::new([4, 4]);
         config.scheduler.max_pending = 512;
-        let builder = Runtime::<Counter>::builder(1, [4, 4]).shard_config(config).mailbox(128);
+        let builder = Scheduler::<Counter>::builder(1, [4, 4]).shard_config(config).mailbox(128);
         assert_eq!(
             builder.queue_depth(),
             640,
@@ -488,19 +494,19 @@ mod tests {
         );
     }
 
-    /// A runtime over `shards` unpinned shard threads, plus the shared record of
+    /// A scheduler over `shards` unpinned shard threads, plus the shared record of
     /// what they did. Pinning is off because these tests are about the shard
     /// lifecycle, and a CI runner may not permit binding at all.
-    fn runtime(shards: usize) -> (Runtime<Counter>, Arc<Observed>) {
+    fn runtime(shards: usize) -> (Scheduler<Counter>, Arc<Observed>) {
         let observed = Arc::new(Observed::default());
         let factory = observed.clone();
-        let runtime = Runtime::<Counter>::builder(shards, [16, 16])
+        let runtime = Scheduler::<Counter>::builder(shards, [16, 16])
             .pin(PinPolicy::Disabled)
             .spawn(move |context: &ShardContext| {
                 factory.contexts.lock().unwrap().push((context.index, context.shards));
                 Counter { index: context.index, observed: factory.clone() }
             })
-            .expect("an unpinned runtime starts on any machine");
+            .expect("an unpinned scheduler starts on any machine");
         (runtime, observed)
     }
 
@@ -522,7 +528,7 @@ mod tests {
 
         // A shard reports its binding before it builds its tokio runtime and
         // calls the factory, so `spawn` returning does not mean every processor
-        // exists yet — only that every thread got far enough to say where it
+        // exists yet: only that every thread got far enough to say where it
         // landed. Shutdown joins the threads, which is the point every factory
         // has certainly run.
         runtime.shutdown();
@@ -608,7 +614,7 @@ mod tests {
         // A shard counts into thread-local `Cell`s and publishes them to these
         // atomics on its tick, so a read taken the instant a call returns is
         // racing that tick. Shutdown ends with a final publish, which is the
-        // point at which the totals are actually settled — so the handles are
+        // point at which the totals are actually settled, so the handles are
         // kept and read after it.
         let stats: Vec<_> = runtime.stats().to_vec();
         runtime.shutdown();
@@ -640,14 +646,14 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "a runtime needs at least one shard")]
-    fn a_runtime_with_no_shards_is_refused() {
-        let _ = Runtime::<Counter>::builder(0, [1, 1]);
+    #[should_panic(expected = "a scheduler needs at least one shard")]
+    fn a_scheduler_with_no_shards_is_refused() {
+        let _ = Scheduler::<Counter>::builder(0, [1, 1]);
     }
 
     #[test]
     #[should_panic(expected = "a mailbox needs capacity")]
     fn a_mailbox_with_no_capacity_is_refused() {
-        let _ = Runtime::<Counter>::builder(1, [1, 1]).mailbox(0);
+        let _ = Scheduler::<Counter>::builder(1, [1, 1]).mailbox(0);
     }
 }

@@ -143,8 +143,8 @@ impl Drop for Harness {
 
 /// The producer side of submission: what a front door pays to hand work over.
 ///
-/// A front door that already holds several requests — a parsed pipeline, a
-/// batch polled off a consumer — should not pay per-item overhead to pass them
+/// A front door that already holds several requests: a parsed pipeline, a
+/// batch polled off a consumer: should not pay per-item overhead to pass them
 /// on. This measures the same work submitted one call at a time against one
 /// batched call, with the drain kept outside the timed region so what is
 /// measured is submission rather than the mailbox emptying.
@@ -152,7 +152,7 @@ impl Drop for Harness {
 /// Both clocks are measured, because the difference between them is the
 /// point. A batch reads the clock once instead of once per item, and what that
 /// is worth depends entirely on what a reading costs: `ManualClock` is an
-/// atomic load, while `SystemClock` — the production default — is
+/// atomic load, while `SystemClock`: the production default: is
 /// `Instant::elapsed`. Measuring only the cheap one would understate what a
 /// real front door saves.
 /// The timer wheel's hot path.
@@ -281,7 +281,7 @@ fn submission(c: &mut Criterion) {
 /// A saturated reactor: thousands of futures live at once.
 ///
 /// The `reactor` group above measures the loop's per-item cost, and does it
-/// with at most a few dozen futures resident — its processor never suspends,
+/// with at most a few dozen futures resident: its processor never suspends,
 /// so a dispatch is polled once and gone. That is the wrong shape for asking
 /// what the outstanding set's *storage* costs, because a set holding sixty-four
 /// futures fits in cache whatever layout it uses.

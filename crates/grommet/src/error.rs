@@ -1,6 +1,6 @@
 //! Classifying failures by what they imply about durable state.
 //!
-//! The hardest bug in a stateful processor is not a failure — it is a failure
+//! The hardest bug in a stateful processor is not a failure: it is a failure
 //! whose outcome you do not know. A commit that timed out may or may not have
 //! landed, so every in-memory copy derived from the old value is now a guess.
 //! Treating that case like an ordinary error is how systems silently serve
@@ -16,8 +16,8 @@ use std::convert::Infallible;
 /// What a failure implies about the *authoritative* store.
 ///
 /// This describes durable state, not the resident copy. An `Err` from
-/// `process` always discards resident state — it was moved into the future and
-/// is gone either way — so if your state is intact and you simply want to
+/// `process` always discards resident state: it was moved into the future and
+/// is gone either way, so if your state is intact and you simply want to
 /// report a business-level rejection, return `Ok(Disposition::Keep(state))`
 /// instead and answer your caller yourself. `Err` means "I no longer hold
 /// something I can trust."

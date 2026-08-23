@@ -24,7 +24,7 @@ pub const COMPUTE: ClassId = 1;
 /// The number of classes in the [`IO`] plus [`COMPUTE`] split.
 ///
 /// Every `CLASSES` parameter in this crate defaults to this, so the common case
-/// never has to name it. `Runtime<P>`, `Router<W>`, `ShardConfig` and
+/// never has to name it. `Scheduler<P>`, `Router<W>`, `ShardConfig` and
 /// `ShardStats` all mean the two-class versions when the argument is left off,
 /// and the first two default their clock to
 /// [`SystemClock`](crate::clock::SystemClock) as well.
@@ -32,8 +32,8 @@ pub const CLASSES: usize = 2;
 
 /// A unit of work routed to the shard owning its affine key.
 ///
-/// Work crosses a thread boundary exactly once — from whoever submitted it to
-/// the shard that owns its key — which is why it must be `Send`. Nothing else
+/// Work crosses a thread boundary exactly once: from whoever submitted it to
+/// the shard that owns its key, which is why it must be `Send`. Nothing else
 /// in the pipeline is: per-key state and the futures processing it stay on the
 /// shard's own core and are free to be `!Send`.
 ///

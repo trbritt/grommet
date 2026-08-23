@@ -39,7 +39,7 @@ pub struct SweepReport {
     /// The largest eviction worklist seen at any point in the sweep. Idle
     /// tracking is per resident key rather than per completion, so this is
     /// bounded by the key count no matter how much throughput passes
-    /// through — a value that scales with `steps` instead means the
+    /// through: a value that scales with `steps` instead means the
     /// scheduler is accumulating one entry per operation.
     pub peak_eviction_backlog: usize,
 }
@@ -70,8 +70,8 @@ impl Rng {
 /// checking every structural invariant after every operation and measuring how
 /// long a key can wait.
 ///
-/// This exercises your *configuration* — class budgets, caps, eviction windows
-/// — without needing your processor, so it is cheap to run in CI.
+/// This exercises your *configuration* (class budgets, caps, eviction windows)
+/// without needing your processor, so it is cheap to run in CI.
 ///
 /// # Panics
 ///
@@ -154,7 +154,7 @@ pub fn scheduler_sweep<const CLASSES: usize>(cfg: Config<CLASSES>, spec: SweepSp
         let live = book.snapshot();
         assert!(
             live.eviction_backlog <= live.resident,
-            "step {step}: {} keys awaiting eviction against {} resident — \
+            "step {step}: {} keys awaiting eviction against {} resident: \
              idle tracking is not bounded by the key count",
             live.eviction_backlog,
             live.resident,
@@ -227,7 +227,7 @@ pub struct CampaignReport {
 /// # Panics
 ///
 /// If any case fails to converge, or if `max_cases` is reached without finding
-/// an unreachable position — which means the workload has more failure points
+/// an unreachable position, which means the workload has more failure points
 /// than the bound and the campaign proved less than it claims.
 pub async fn single_fault_campaign<F, Fut>(max_cases: usize, mut case: F) -> CampaignReport
 where
@@ -272,8 +272,8 @@ where
 ///
 /// The closure should apply the *same* request id every time to the *same*
 /// world, and return something whose [`Deterministic::digest`] covers the
-/// durable state and the response. Anything that double-applies — a retry that
-/// credits twice, a counter that increments per attempt — shows up as a digest
+/// durable state and the response. Anything that double-applies: a retry that
+/// credits twice, a counter that increments per attempt: shows up as a digest
 /// that keeps moving.
 ///
 /// This is the check that gives an idempotency key its meaning. The runtime
@@ -336,7 +336,7 @@ mod tests {
         let mut cfg = Config::<2>::new([4, 2]);
         cfg.max_pending = 256;
         // Long enough that no key is ever old enough to age out mid-run, so
-        // the worklist is only ever added to — the leaking case.
+        // the worklist is only ever added to: the leaking case.
         cfg.evict_after = std::time::Duration::from_secs(3600);
         let report = scheduler_sweep(cfg, SweepSpec { keys: KEYS, steps: 50_000, seed: 11 });
 

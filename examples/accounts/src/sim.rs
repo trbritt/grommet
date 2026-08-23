@@ -267,7 +267,7 @@ mod tests {
     /// These doubles are the specification every fault test is measured
     /// against, so what they promise is worth checking directly rather than
     /// only through the processor that consumes them.
-    // `SimStore::Session` is a unit — there is no pool to hold — so binding
+    // `SimStore::Session` is a unit: there is no pool to hold, so binding
     // one reads as a unit binding. It is written this way so the tests still
     // say how the port is meant to be used.
     #[allow(clippy::let_unit_value)]
@@ -317,8 +317,8 @@ mod tests {
             store.commit(&mut session, id, ACCOUNT + 1, &empty, Mutation::Delta(5)).await,
             Err(StoreError::RequestConflict),
         );
-        // Either one alone is enough to conflict, so an exact replay — and only
-        // an exact replay — is recognised as the duplicate it is.
+        // Either one alone is enough to conflict, so an exact replay, and only
+        // an exact replay: is recognised as the duplicate it is.
         assert_eq!(
             store.commit(&mut session, id, ACCOUNT, &applied, Mutation::Delta(5)).await,
             Ok(CommitOutcome::Committed { account: applied, duplicate: true }),

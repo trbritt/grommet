@@ -8,7 +8,7 @@
 //! There is a pool per memory node rather than one pool for the machine. A shard
 //! that ships a closure and its captured data to a worker on another node pays
 //! the interconnect on every task, which is exactly the cost that pinning the
-//! shard was meant to avoid — so [`OffloadPools`] builds the set a [`Plan`] asks
+//! shard was meant to avoid, so [`OffloadPools`] builds the set a [`Plan`] asks
 //! for, and each shard submits to the one local to itself.
 
 #![deny(unsafe_code)]
@@ -85,7 +85,7 @@ impl RayonOffload {
 
     /// `queue_depth` outstanding tasks per worker. Deeper keeps workers fed
     /// through bursts; shallower makes a shard feel backpressure sooner, which
-    /// is usually what a latency objective wants — and makes
+    /// is usually what a latency objective wants, and makes
     /// `permit_wait_nanos` a more responsive signal that the pool is too small.
     pub fn with_queue_depth(plan: Arc<Plan>, pool: &OffloadPool, queue_depth: usize) -> Self {
         let workers = pool.cpus.len().max(1);
@@ -185,7 +185,7 @@ impl OffloadPools {
         Self { pools }
     }
 
-    /// The pool local to `node`, falling back to the first — a shard is better
+    /// The pool local to `node`, falling back to the first: a shard is better
     /// served by a remote pool than by no pool.
     pub fn for_node(&self, node: Option<usize>) -> Option<RayonOffload> {
         node.and_then(|node| self.pools.iter().find(|pool| pool.node == Some(node)))

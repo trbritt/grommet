@@ -10,14 +10,10 @@
 //! moment it returns `Ready`, and reuses that storage without allocating again.
 //! It is written entirely in safe Rust.
 //!
-//! Storage sits behind the private [`Storage`] trait, which exists so an
-//! alternative layout can be built and benchmarked against this one through an
-//! otherwise identical loop rather than argued about. One such alternative — a
-//! single prefaulted contiguous `MaybeUninit<F>` allocation, reached through a
-//! small documented unsafe core — was written, verified under Miri, and
-//! measured. Against thousands of live futures it was not faster, so it was not
-//! kept: the scan and the future's own poll dominate, and contiguity had
-//! nothing left to win. The trait remains for the next candidate.
+//! Storage sits behind the private [`Storage`] trait so that an alternative
+//! layout can be substituted and measured through an otherwise identical loop.
+//! At the populations this set is built for, the scan and the future's own poll
+//! dominate; a candidate layout has to beat that, not merely differ from it.
 //!
 //! # Ready protocol
 //!
@@ -113,9 +109,9 @@
 //!
 //! Benchmark any candidate storage with the actual future type.  Include first
 //! touch, sparse and dense readiness, cross-core wakes, cap truncation, greedy
-//! refill, stale wake storms, and capacities on both sides of 64 — and above
-//! all at the concurrency the deployment actually runs, since layout
-//! differences that look real at sixty-four futures vanish at three thousand.  For a trading loop,
+//! refill, stale wake storms, and capacities on both sides of 64. Measure at
+//! the concurrency the deployment actually runs: layout differences that look
+//! real at sixty-four live futures can vanish entirely at three thousand.  For a trading loop,
 //! p99.99 and maximum cycles per reactor turn matter more than mean throughput.
 
 use crossbeam_utils::CachePadded;
@@ -140,10 +136,9 @@ const WORD_BITS: usize = 64;
 /// It is a plain constant rather than a generic parameter deliberately. A
 /// generic would let each call site pick a ceiling, but this module is
 /// crate-private and the reactor is its only caller, so every instantiation
-/// would pass the same value — and threading a parameter through the set, its
-/// shared state and the reactor to say one thing in one place is ceremony, not
-/// configurability. A constant is decided at compile time just as firmly, with
-/// nothing to thread.
+/// would pass the same value. Threading a parameter through the set, its shared
+/// state and the reactor to say one thing in one place buys nothing a constant
+/// does not; both are settled at compile time.
 const MAX_WORDS: usize = 1_024;
 
 /// Summary words needed to address [`MAX_WORDS`]. Fixed at compile time, so a
@@ -271,7 +266,7 @@ impl ReadySet {
     /// Take one summary word: the set of ready words it announces.
     ///
     /// Clearing this before the words it names is what keeps a mark racing the
-    /// scan from being lost — such a mark re-announces its word, and the next
+    /// scan from being lost: such a mark re-announces its word, and the next
     /// pass finds it.
     #[inline]
     fn take_summary(&self, summary: usize) -> u64 {
@@ -822,7 +817,7 @@ impl<F: Future, S: Storage<F>> Inner<F, S> {
         // must resume where the last one stopped, or a slot low in the order
         // could be passed over indefinitely. So summary words rotate from the
         // cursor's, and the words inside the cursor's summary word rotate from
-        // the cursor's own — with both remainders deferred to the end.
+        // the cursor's own, with both remainders deferred to the end.
         //
         // Summary words are taken as the rotation reaches them, never all at
         // once: one is in hand at a time, so an unwind restores that one and
@@ -1069,6 +1064,9 @@ mod tests {
         output
     }
 
+    // The exercises below are generic over `Storage` rather than written
+    // against the one implementation, so a candidate layout inherits the whole
+    // suite by naming itself once at each call site.
     fn exercise_recycling<S: Storage<Countdown>>() {
         let mut set = Inner::<Countdown, S>::with_capacity(8);
         for round in 0..2_000u64 {
@@ -1082,12 +1080,12 @@ mod tests {
     }
 
     #[test]
-    fn both_backends_recycle_and_complete() {
+    fn slots_recycle_and_every_future_completes() {
         exercise_recycling::<BoxedStorage<Countdown>>();
     }
 
     #[test]
-    fn compiler_generated_not_unpin_futures_work_in_both_backends() {
+    fn compiler_generated_not_unpin_futures_are_polled_in_place() {
         async fn job(value: u64) -> u64 {
             countdown(2, value).await
         }
@@ -1133,7 +1131,7 @@ mod tests {
     ///
     /// With more than 4,096 slots the summary itself spans several words, so a
     /// capped pass has to resume in the right summary word as well as the right
-    /// word — a rotation that restarted at summary word zero would serve the
+    /// word. A rotation that restarted at summary word zero would serve the
     /// first 4,096 slots forever and starve everything above them.
     fn exercise_rotation_across_a_summary_word<S: Storage<Countdown>>() {
         // Two summary words: the first covers slots 0..4,096, the second the
@@ -1142,9 +1140,9 @@ mod tests {
         let mut set = Inner::<Countdown, S>::with_capacity(CAPACITY);
 
         // Park the cursor deep inside the second summary word's territory. A
-        // capped pass over a full set is what moves it there — pushing and
-        // draining one at a time would keep reusing the slot just freed and
-        // leave the cursor where it started.
+        // capped pass over a full set is what moves it there. Pushing and
+        // draining one at a time keeps reusing the slot just freed, which
+        // leaves the cursor where it started.
         for payload in 0..CAPACITY as u64 {
             set.push(countdown(0, payload));
         }
@@ -1176,8 +1174,8 @@ mod tests {
     // Skipped under Miri, not scaled down: the property only exists above
     // 4,096 slots, so a smaller version would not be this test. Miri interprets
     // every one of those slots through a full rotation, which is beyond what it
-    // can carry — the structure it shares with smaller sets is covered by
-    // `capacity_and_word_boundaries_hold_for_both_backends`, which does run
+    // can carry. The structure it shares with smaller sets is covered by
+    // `capacity_and_word_boundaries_hold`, which does run
     // there.
     #[test]
     #[cfg_attr(miri, ignore = "4,160 slots through a full rotation is beyond Miri")]
@@ -1213,7 +1211,7 @@ mod tests {
     }
 
     #[test]
-    fn capacity_and_word_boundaries_hold_for_both_backends() {
+    fn capacity_and_word_boundaries_hold() {
         exercise_boundaries::<BoxedStorage<Countdown>>();
     }
 
@@ -1247,7 +1245,7 @@ mod tests {
     }
 
     #[test]
-    fn completed_future_is_dropped_immediately_in_both_backends() {
+    fn a_completed_future_is_dropped_immediately() {
         exercise_immediate_drop::<BoxedStorage<DropReady>>();
     }
 
@@ -1398,7 +1396,7 @@ mod tests {
     }
 
     #[test]
-    fn randomized_capped_refill_battle_runs_on_both_backends() {
+    fn randomized_capped_refill_matches_an_independent_model() {
         battle::<BoxedStorage<Countdown>>();
     }
 

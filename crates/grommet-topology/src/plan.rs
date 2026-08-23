@@ -6,7 +6,7 @@
 //!
 //! The plan is computed directly from an `hwlocality::Topology`, which can be
 //! the live machine, a synthetic description, or an XML capture of somebody
-//! else's server — so every rule below is testable without owning the hardware.
+//! else's server, so every rule below is testable without owning the hardware.
 
 #[cfg(feature = "hwloc")]
 use crate::cgroup::Quota;
@@ -78,7 +78,7 @@ pub struct Plan {
     pub offload: Vec<OffloadPool>,
     /// Whether this platform will honour a request to bind a thread. Answered
     /// before any thread is spawned, so a strict policy fails at configuration
-    /// time rather than silently doing nothing — which is what thread affinity
+    /// time rather than silently doing nothing, which is what thread affinity
     /// does on Apple silicon.
     pub can_bind_cpu: bool,
     pub can_bind_memory: bool,
@@ -86,7 +86,7 @@ pub struct Plan {
     /// The machine this plan describes, kept so the plan can act on itself.
     ///
     /// Binding is a call on a topology and has to happen on the thread being
-    /// placed — long after planning finished, on a thread with no other way to
+    /// placed: long after planning finished, on a thread with no other way to
     /// reach one. Re-reading the machine per thread would be both slower and
     /// less trustworthy, since a second read can disagree with the first.
     /// Without hwloc there is nothing to bind through, so there is nothing to

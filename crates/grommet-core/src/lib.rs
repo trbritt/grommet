@@ -13,7 +13,7 @@
 //! A completed key is never greedily re-dispatched. Both new arrivals and
 //! completions place a key at the BACK of a round-robin ready ring, and
 //! dispatch always pops from the FRONT. A key sitting at position `k` is
-//! therefore dispatched within `k` dispatches — a strict bound, hence
+//! therefore dispatched within `k` dispatches: a strict bound, hence
 //! starvation-free. One key cannot monopolize a shard.
 //!
 //! There is one ring per work class, each with its own in-flight budget, so a
@@ -23,8 +23,8 @@
 //!
 //! # Trusting the caller
 //!
-//! Everything this module knows about a payload — its affine key, its work
-//! class and its optional deadline — is stamped once by the caller at
+//! Everything this module knows about a payload: its affine key, its work
+//! class and its optional deadline: is stamped once by the caller at
 //! admission and never recomputed. A caller-supplied trait implementation that
 //! answered inconsistently on a second call would otherwise desynchronize the
 //! ready rings from the per-key queues, so the opportunity is removed rather
@@ -205,7 +205,7 @@ struct Slot<K, S> {
     idle_since: Duration,
     /// Neighbours in the shard's idle list, oldest first. Meaningful only
     /// while `presence` is [`Presence::Idle`], and `None` in every other
-    /// state — a key that is ready, running or flushing is not a candidate.
+    /// state: a key that is ready, running or flushing is not a candidate.
     idle_prev: Option<K>,
     idle_next: Option<K>,
 }
@@ -244,7 +244,7 @@ pub struct Scheduler<K, P, S, const CLASSES: usize = 2> {
     ///
     /// Keys join at the tail when they go idle and are unlinked the moment
     /// they are touched, so the list holds each idle key exactly once and
-    /// nothing else — it is bounded by the resident key count, and a sweep
+    /// nothing else: it is bounded by the resident key count, and a sweep
     /// walking from the head sees keys in genuine least-recently-used order
     /// with no stale entries to skip.
     idle_head: Option<K>,
@@ -571,7 +571,7 @@ where
 
     /// Verify every structural invariant. Linear in resident keys plus total
     /// ring length, with no allocation, so it is affordable under a debug
-    /// assertion on every reactor turn — which is where it earns its keep.
+    /// assertion on every reactor turn, which is where it earns its keep.
     #[cfg(not(coverage))]
     pub fn check_invariants(&self) -> Result<(), &'static str> {
         let queued: usize = self.keys.values().map(|slot| slot.queue.len()).sum();
@@ -590,7 +590,7 @@ where
         }
         // Ring membership is checked outward from the rings and then reconciled
         // by count, rather than by asking each key which rings hold it. The
-        // latter reads every ring once per key — quadratic, and at a few
+        // latter reads every ring once per key: quadratic, and at a few
         // thousand resident keys it costs more per item than the scheduling it
         // is guarding, which put a ceiling on how large a simulation could run.
         let mut listed = 0;
@@ -611,7 +611,7 @@ where
             }
         }
         // A key listed in two rings, or twice in one, would need a second
-        // `Ready` slot to balance this — and a slot has one presence.
+        // `Ready` slot to balance this, and a slot has one presence.
         let ready =
             self.keys.values().filter(|slot| matches!(slot.presence, Presence::Ready(_))).count();
         if !always!(listed == ready) {
@@ -632,7 +632,7 @@ where
 
         // The idle list is what bounds this scheduler's memory: it must hold
         // every idle key, hold nothing else, and hold each of them once. The
-        // walk below establishes all three — forward links reach only idle
+        // walk below establishes all three: forward links reach only idle
         // keys, back links agree with them (so no key appears twice without
         // one of the two disagreeing), and the count reconciles against the
         // number of idle slots, which catches a key that is simply missing.
@@ -949,7 +949,7 @@ mod tests {
     }
 
     /// The property the intrusive list exists for. A key that cycles through
-    /// idle over and over must occupy exactly one entry the whole time — under
+    /// idle over and over must occupy exactly one entry the whole time: under
     /// the timestamped candidate queue this grew once per completion, without
     /// any bound, which is the bug this replaced.
     #[test]

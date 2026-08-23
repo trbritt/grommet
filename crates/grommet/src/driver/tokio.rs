@@ -1,22 +1,19 @@
-//! Waiting as a guest of a tokio runtime.
+//! Hosting a shard's scheduler on a tokio runtime.
 //!
-//! This is the compatibility path, and it is meant to be permanent: the
-//! ecosystem's database, cache and HTTP clients are written against tokio's IO,
-//! and a runtime that refused to host them would be a runtime nobody could
-//! adopt incrementally.
+//! Each shard thread builds its own current-thread runtime and runs one
+//! scheduler on it. That runtime drives whatever IO the processor performs, so
+//! a client keeps its existing database, cache and HTTP libraries unchanged;
+//! grommet adds key-affine dispatch and compute offload above them.
 //!
-//! It suspends rather than sleeps. The shard is one task on the host's
-//! current-thread runtime, and that runtime's reactor — the thing that will
-//! notice a processor's socket becoming readable — only runs while this task is
-//! suspended. Blocking here would stop the IO those futures are waiting on from
-//! ever being observed, and the shard would deadlock against itself. It would
-//! also starve any co-tenant: tests join a shard with the driver submitting to
-//! it, and both are sub-futures of one task on one thread.
+//! Waiting here suspends the task rather than blocking the thread. The
+//! runtime's reactor is what notices a processor's socket becoming readable,
+//! and it only runs while the task is suspended, so blocking would stop the IO
+//! those futures wait on from ever being observed. It would also starve any
+//! co-tenant: a test that joins a shard with the code submitting to it puts
+//! both on one thread.
 //!
-//! The timer is tokio's, deliberately and only here. The *schedule* belongs to
-//! the shard's wheel and the *clock* to the caller; what tokio supplies is the
-//! wakeup, which is a driver's job and not something a guest can provide for
-//! itself. An owned driver supplies its own and this file stops being reached.
+//! The timer is tokio's, and only here. The schedule belongs to the shard's
+//! wheel and the clock to the caller; what the host supplies is the wakeup.
 
 use super::Driver;
 use std::pin::Pin;
@@ -25,11 +22,13 @@ use std::time::Duration;
 use tokio::time::Sleep;
 
 /// Suspends the shard's task until a wake or a deadline.
+///
+/// Selected by the `driver-tokio` feature.
 pub(crate) struct TokioDriver {
     /// One allocation for the life of the shard. `Sleep` is `!Unpin` and has to
-    /// stay put to be reset, and resetting is what keeps this off the hot path:
-    /// arming a timer registers with the host's timer wheel, and the shard's
-    /// schedule moves once per tick rather than once per turn.
+    /// stay put to be reset. Resetting rather than rebuilding keeps this off
+    /// the hot path: arming a timer registers with the host's own timer wheel,
+    /// and the shard's schedule moves once per tick rather than once per turn.
     sleep: Pin<Box<Sleep>>,
     /// What the sleep is currently set for, so an unchanged deadline does not
     /// pay to re-register.

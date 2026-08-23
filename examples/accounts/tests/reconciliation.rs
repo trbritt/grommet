@@ -1,7 +1,7 @@
 //! Recovery from every single failure position the workload can reach.
 //!
 //! Individual tests can only check the failures someone thought to write down.
-//! This drives the whole shard — router, scheduler, processor, adapters — once
+//! This drives the whole shard: router, scheduler, processor, adapters: once
 //! per injectable operation, and insists each one reconciles.
 
 use accounts::domain::{Account, Op, Reply, RequestId};

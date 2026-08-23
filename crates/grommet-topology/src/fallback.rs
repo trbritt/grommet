@@ -2,7 +2,7 @@
 //!
 //! This is what the crate does when the `hwloc` feature is off: a deliberate
 //! opt-out, taken by builds that cannot afford a C toolchain, a network fetch
-//! at build time, or a dependency on libhwloc at all — musl images,
+//! at build time, or a dependency on libhwloc at all: musl images,
 //! air-gapped builds, distribution packaging.
 //!
 //! It plans from [`std::thread::available_parallelism`], which is the honest
