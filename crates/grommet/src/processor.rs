@@ -16,7 +16,7 @@ pub type KeyOf<P> = <<P as Processor>::Work as Work>::Key;
 /// to be `!Send`, which is the point of the whole design: connection pools,
 /// caches and per-key state can be held behind `Rc` and mutated through `Cell`
 /// or `RefCell` with no synchronization at all. If you need `Send` futures and
-/// work stealing, use an ordinary multi-threaded executor — this crate is
+/// work stealing, use an ordinary multi-threaded executor: this crate is
 /// deliberately the other thing.
 ///
 /// `Clone` is required because each dispatched item owns a handle for the
@@ -31,7 +31,7 @@ pub type KeyOf<P> = <<P as Processor>::Work as Work>::Key;
 /// locking. Returning [`Disposition::Keep`] hands it back for the next
 /// dispatch, and [`Disposition::Drop`] declares it untrustworthy so the next
 /// dispatch reloads from the authoritative source. Any operation whose outcome
-/// is unknown — a timeout, a lost acknowledgement — must return `Drop`.
+/// is unknown: a timeout, a lost acknowledgement: must return `Drop`.
 #[allow(async_fn_in_trait)]
 pub trait Processor: Clone + 'static {
     type Work: Work;
@@ -45,8 +45,8 @@ pub trait Processor: Clone + 'static {
     /// Process one item. `state` is the key's resident state, or `None` when
     /// nothing is resident and it must be loaded.
     ///
-    /// Returning `Err` always discards the key's resident state — it was moved
-    /// into this future and cannot be recovered — so the next dispatch reloads.
+    /// Returning `Err` always discards the key's resident state: it was moved
+    /// into this future and cannot be recovered, so the next dispatch reloads.
     /// A failure that leaves your state intact is not an error here: return
     /// `Ok(Disposition::Keep(state))` and answer your caller yourself.
     async fn process(
@@ -94,7 +94,7 @@ pub trait Processor: Clone + 'static {
 
 /// What a shard does when a [`Processor::process`] future panics.
 ///
-/// The panic is always caught — otherwise it would unwind the shard's reactor
+/// The panic is always caught: otherwise it would unwind the shard's reactor
 /// loop, killing every key that shard owns and leaving the scheduler's
 /// in-flight accounting permanently wrong. The state that was moved into the
 /// panicking future is gone either way, so the key is always treated as

@@ -62,6 +62,22 @@ jobs:
       # Doctests are not covered by `--all-targets`, so they are a separate run.
       - run: just doc-test
 
+  # The shard's host drivers. Only one is compiled into any given build, so a
+  # shim that stopped agreeing with the loop would go unnoticed until someone
+  # selected it.
+  drivers:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-05-01
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
+      - run: just test-drivers
+
   # The pure-Rust configuration, with hwloc opted out entirely.
   #
   # No libhwloc is installed and no cache is restored, so this job fails if

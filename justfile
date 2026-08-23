@@ -31,6 +31,15 @@ doc-test:
 doc:
     RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
 
+# Every driver the shard can be hosted on.
+#
+# The loop is identical across drivers and only the host shim differs, so what
+# this catches is a shim that stopped compiling or stopped agreeing with the
+# loop — which nothing else would notice, since the default build only ever
+# exercises one of them.
+test-drivers:
+    cargo test -p grommet --lib --no-default-features --features driver-tokio
+
 # The pure-Rust configuration: hwloc opted out entirely.
 #
 # This is what a musl image, an air-gapped build, or a distribution package that
@@ -41,11 +50,15 @@ doc:
 #
 # The example is deliberately absent: it demonstrates hardware placement, so
 # building it without hwloc would be demonstrating the wrong thing.
+# `driver-tokio` is named explicitly: the opt-out is about hwloc, and a shard
+# still needs a host to wait on.
 test-no-topology:
     cargo test -p grommet -p grommet-core -p grommet-topology -p grommet-offload \
-        -p grommet-testkit --no-default-features --all-targets
+        -p grommet-testkit --no-default-features --all-targets \
+        --features grommet/driver-tokio,grommet-offload/driver-tokio,grommet-testkit/driver-tokio
     cargo test -p grommet -p grommet-core -p grommet-topology -p grommet-offload \
-        -p grommet-testkit --no-default-features --doc
+        -p grommet-testkit --no-default-features --doc \
+        --features grommet/driver-tokio,grommet-offload/driver-tokio,grommet-testkit/driver-tokio
 
 # The same gate against a system libhwloc instead of a vendored one.
 #
@@ -56,8 +69,9 @@ test-no-topology:
 # turns hwloc on, the second is what would have built it from source.
 test-system-hwloc:
     cargo test --workspace --all-targets --no-default-features \
-        --features accounts/gen,accounts/topology
-    cargo test --workspace --doc --no-default-features --features accounts/gen,accounts/topology
+        --features accounts/gen,accounts/topology,accounts/driver-tokio
+    cargo test --workspace --doc --no-default-features \
+        --features accounts/gen,accounts/topology,accounts/driver-tokio
 
 # A publish cannot be taken back, so every manifest is checked for the metadata
 # and the packageability crates.io demands before a tag exists, not after.
@@ -71,6 +85,12 @@ package:
 sim:
     RUSTFLAGS="--cfg sim --cfg fault_injection" cargo test --workspace --all-targets \
         --features accounts/sim --profile sim
+
+# Exhaustive interleaving checks on the reactor's wake protocol — the ready
+# bits and the register-early discipline the parked loop depends on. Release,
+# because loom explores every ordering and a debug build multiplies that.
+loom:
+    RUSTFLAGS="--cfg loom" cargo test -p grommet --lib --release loom_
 
 # The scheduler slab is the only unsafe code in the workspace. Miri runs its
 # randomized model test against reference queues, which is what makes the

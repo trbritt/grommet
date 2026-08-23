@@ -6,7 +6,7 @@ use accounts::processor::AccountProcessor;
 use accounts::prod::{PgStore, RedisCache};
 use grommet::metrics::ShardStats;
 use grommet::topology::{Observation, Workload, detect};
-use grommet::{PinPolicy, Runtime, ShardConfig};
+use grommet::{PinPolicy, Scheduler, ShardConfig};
 use grommet_offload::{OffloadPools, OffloadStats, RayonOffload};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -37,7 +37,7 @@ fn flag(name: &str, default: bool) -> bool {
 /// counters.
 ///
 /// The runtime publishes gauges once per tick from each shard's own thread; this
-/// only reads them. The calibration line is advice for the next restart — the
+/// only reads them. The calibration line is advice for the next restart: the
 /// placement it describes was fixed before the first request arrived and does
 /// not move while the service runs.
 fn start_exporter<const CLASSES: usize>(
@@ -99,7 +99,7 @@ fn main() {
     let pool_size = setting("GROMMET_POOL_SIZE", 64);
 
     // What the hardware cannot tell us: how much of this service's CPU demand is
-    // computation rather than reactor work. It is static, and deliberately so —
+    // computation rather than reactor work. It is static, and deliberately so,
     // the exporter below prints what the counters say it should have been, for
     // the next restart to use.
     let workload = Workload {
@@ -148,7 +148,7 @@ fn main() {
     shard_config.coalesce_duplicates = true;
 
     let shards = setting("GROMMET_SHARDS", plan.shards.len());
-    let runtime = Runtime::<AccountProcessor<PgStore, RedisCache, RayonOffload>>::builder(
+    let runtime = Scheduler::<AccountProcessor<PgStore, RedisCache, RayonOffload>>::builder(
         shards,
         [
             shard_config.scheduler.max_inflight[IO as usize],
@@ -161,7 +161,7 @@ fn main() {
     .mailbox(setting("GROMMET_MAILBOX", 1024))
     .spawn(move |shard| {
         // Each shard builds its own pools, on its own core, so no connection
-        // is ever shared across cores — and takes the compute pool local to
+        // is ever shared across cores, and takes the compute pool local to
         // its own memory node, so a closure it ships does not cross the
         // interconnect on the way to a worker.
         let store = PgStore::from_url(&postgres_url, pool_size).expect("PostgreSQL pool");

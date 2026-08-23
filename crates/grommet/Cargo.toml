@@ -15,10 +15,13 @@ keywords = ["thread-per-core", "scheduler", "async", "sharding", "runtime"]
 categories = ["asynchronous", "concurrency", "network-programming"]
 
 [lints.rust]
-unexpected_cfgs = { level = "deny", check-cfg = ["cfg(coverage)"] }
+unexpected_cfgs = { level = "deny", check-cfg = ["cfg(coverage)", "cfg(loom)"] }
 
 [dependencies]
+# `CachePadded`: the outstanding set's ready words are written by other
+# threads and read by the owner, so they must not share a cache line.
 ahash = "0.8"
+crossbeam-utils = "0.8"
 futures = "0.3"
 tokio = { version = "1", features = ["rt", "sync", "time", "macros"] }
 grommet-core = { workspace = true }
@@ -29,7 +32,7 @@ grommet-core = { workspace = true }
 grommet-topology = { workspace = true, default-features = false }
 
 [features]
-default = ["topology", "vendored"]
+default = ["driver-tokio", "topology", "vendored"]
 
 # Read the machine and bind threads to it, through libhwloc.
 #
@@ -43,12 +46,27 @@ default = ["topology", "vendored"]
 # a silently unpinned process.
 topology = ["grommet-topology/hwloc"]
 
+# Host the shard on a tokio current-thread runtime and wait as its guest.
+#
+# On by default and meant to stay available permanently: the ecosystem's
+# database, cache and HTTP clients are written against tokio's IO, and a
+# processor awaiting one of them needs that runtime to be the thing driving this
+# thread. Grommet's own drivers arrive alongside it rather than in place of it,
+# so a deployment picks per binary rather than per fork.
+driver-tokio = []
+
 # Build libhwloc from source. See `grommet-topology` for why that is the
 # default and what it costs.
 vendored = ["topology", "grommet-topology/vendored"]
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "sync", "time", "macros", "test-util"] }
+
+# Loom builds compile the crate itself with modeled atomics, so the dependency
+# cannot be dev-only; gating it behind `--cfg loom` keeps it out of every
+# ordinary build. This is the arrangement tokio itself uses.
+[target.'cfg(loom)'.dependencies]
+loom = "0.7"
 
 # See `grommet-topology`: the vendored libhwloc build needs network access,
 # which a docs.rs build does not have. `topology` is named explicitly so the

@@ -9,8 +9,8 @@
 //! and one pinned thread per core produces ninety-six threads that stall
 //! together every time the period's budget runs out.
 //!
-//! The parsers here are pure functions over file contents, so every shape —
-//! v1 against v2, fractional limits, unlimited groups, malformed files — is a
+//! The parsers here are pure functions over file contents, so every shape,
+//! v1 against v2, fractional limits, unlimited groups, malformed files: is a
 //! test without needing a container.
 
 use std::time::Duration;

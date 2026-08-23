@@ -22,7 +22,10 @@ grommet = { workspace = true }
 grommet-core = { workspace = true }
 
 [features]
-default = ["topology", "vendored"]
+default = ["driver-tokio", "topology", "vendored"]
+
+# Host the shard on a tokio runtime. See `grommet` for why this is permanent.
+driver-tokio = ["grommet/driver-tokio"]
 
 # Hardware placement, through `grommet`. See that crate for the trade.
 topology = ["grommet/topology"]

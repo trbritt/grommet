@@ -1,8 +1,8 @@
 //! The queue between a submitter and the shard that owns the key.
 //!
 //! This is deliberately a *seam* rather than a re-export. The mailbox is the
-//! component most likely to be replaced — a shard-owned MPSC ring with its own
-//! doorbell is the direction this runtime is going — and a public API that
+//! component most likely to be replaced: a shard-owned MPSC ring with its own
+//! doorbell is the direction this runtime is going, and a public API that
 //! named the channel it happens to use today would make that swap a breaking
 //! change for everyone downstream.
 //!
@@ -14,7 +14,7 @@
 //! Depth composes: a shard will hold up to `capacity` items here *plus*
 //! whatever its scheduler has already admitted, so the number of items in
 //! flight for one shard is bounded by `capacity + Config::max_pending`, not by
-//! either alone. See [`Builder::mailbox`](crate::runtime::Builder::mailbox).
+//! either alone. See [`Builder::mailbox`](crate::scheduler::Builder::mailbox).
 
 use tokio::sync::mpsc;
 
@@ -92,11 +92,26 @@ impl<W> std::fmt::Debug for Inbox<W> {
 
 impl<W> Inbox<W> {
     /// Wait for the next item, or `None` once every [`Mailbox`] has been
-    /// dropped and the queue is drained — which is how a shard is told to
+    /// dropped and the queue is drained, which is how a shard is told to
     /// finish draining and exit.
     #[inline]
     pub async fn recv(&mut self) -> Option<W> {
         self.inner.recv().await
+    }
+
+    /// Poll for the next item, registering the task's waker when none is
+    /// queued.
+    ///
+    /// Crate-private: this is the reactor's drain primitive, and the types in
+    /// its signature are `std::task`'s, so nothing of the substrate shows
+    /// through it. `Ready(None)` means every [`Mailbox`] is gone and the queue
+    /// is drained: the signal to stop admitting.
+    #[inline]
+    pub(crate) fn poll_recv(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<W>> {
+        self.inner.poll_recv(cx)
     }
 
     /// Take an item that is already queued, without waiting.

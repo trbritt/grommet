@@ -62,7 +62,7 @@ impl Processor for Ledger {
 }
 
 // SystemClock and the two-class IO + CPU split are the defaults.
-let runtime = Runtime::<Ledger>::builder(shards, [2048, 64])
+let runtime = Scheduler::<Ledger>::builder(shards, [2048, 64])
     .pin(PinPolicy::Require)
     .coalesce_duplicates(true)
     .spawn(|shard| Ledger::new(shard))?;
@@ -113,10 +113,10 @@ grommet = { version = "0.1", default-features = false, features = ["topology"] }
 grommet = { version = "0.1", default-features = false }
 ```
 
-The last one still plans a layout and still starts a runtime — every type stays
-where it was — but it plans from `available_parallelism` alone, knows nothing
+The last one still plans a layout and still starts a runtime: every type stays
+where it was, but it plans from `available_parallelism` alone, knows nothing
 about SMT siblings, memory nodes or core kinds, and binds no threads. It says
-all of that in `Plan::notes`, and `Runtime::topology()` reports nothing pinned.
+all of that in `Plan::notes`, and `Scheduler::topology()` reports nothing pinned.
 
 `PinPolicy::Require` does not exist in that build. Demanding placement from a
 configuration that cannot perform it is a contradiction rather than a strict
@@ -146,6 +146,26 @@ starts unpinned and quietly measures the OS scheduler instead of this one.
   the shard exits. Resident state is a write-back cache; a shutdown that skipped
   it would lose writes the processor was told it could keep.
 
+## What grommet is, and is not
+
+Grommet is a scheduler, not a runtime. It reads the machine, decides how many
+shards it will carry and which cores they belong on, and gives each shard
+key-affine dispatch with a strict starvation bound and its own compute offload.
+What it does not do is drive futures: polling IO, waking a socket, owning the
+thread is the host runtime's job, and grommet runs on top of one.
+
+That division is the point. Tokio, monoio and glommio already solve driving
+futures well; none of them knows that two items sharing an affine key must
+never run at once, or that a long computation belongs on a different core from
+the reactor that dispatched it. Grommet supplies that and borrows the rest, so
+adopting it does not mean leaving the ecosystem your database, cache and HTTP
+clients are written against.
+
+Concretely: a Cargo feature selects the host. `driver-tokio` builds one
+current-thread tokio runtime per shard thread, pinned where the topology plan
+said, and runs a grommet scheduler on it. Your processor keeps awaiting
+`tokio-postgres` exactly as before.
+
 ## What it deliberately does not do
 
 - **No work stealing.** It would break the one-owner guarantee, which is the
@@ -155,6 +175,9 @@ starts unpinned and quietly measures the OS scheduler instead of this one.
   to shard. Nothing after that is. `Rc` and `Cell` are correct here, and code
   written against `Send` futures and work stealing will not fit. If you want
   that, use an ordinary multi-threaded executor.
+- **No IO of its own.** No sockets, no timers you can await, no file API. The
+  host runtime provides those and grommet schedules around them. An io_uring
+  fast path is monoio's business, not something to reimplement here.
 - **No durable deduplication.** In-flight coalescing suppresses a retry while
   its original is still outstanding. Once the original completes its id leaves
   the index, because answering a later retry correctly needs the original's

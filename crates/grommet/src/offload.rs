@@ -13,7 +13,7 @@ use std::fmt;
 pub enum OffloadError {
     /// The pool is shutting down and will not accept work.
     Closed,
-    /// The worker never produced a result — it panicked, or the pool dropped
+    /// The worker never produced a result: it panicked, or the pool dropped
     /// the task.
     WorkerLost,
     /// A deterministic test injected this failure.

@@ -1,7 +1,7 @@
 //! Metrics shaped for a thread-per-core hot path.
 //!
 //! [`ShardHot`] is written only by the shard that owns it, so it uses plain
-//! `Cell` counters — there are no atomics anywhere on the per-item path. Once
+//! `Cell` counters: there are no atomics anywhere on the per-item path. Once
 //! per tick the shard publishes a snapshot into [`ShardStats`], which an
 //! exporter on another thread can read.
 //!
@@ -38,7 +38,7 @@ pub struct ShardHot {
     pub expired: Cell<u64>,
     /// Keys whose state was handed to `on_evict`.
     pub evicted: Cell<u64>,
-    /// Time inside the reactor loop doing scheduling bookkeeping — admission,
+    /// Time inside the reactor loop doing scheduling bookkeeping: admission,
     /// completion, dispatch. This is the runtime's own overhead. Work itself
     /// shows up as parked time, not here.
     pub busy_nanos: Cell<u64>,

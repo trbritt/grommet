@@ -2,7 +2,7 @@
 //!
 //! A placement nothing acts on is a comment. These are the calls that turn one
 //! into a bound thread, and they report what the operating system actually did
-//! rather than what was asked for — binding is advisory on more platforms than
+//! rather than what was asked for: binding is advisory on more platforms than
 //! people expect, and a benchmark run on unbound threads measures the OS
 //! scheduler rather than this one.
 //!
@@ -43,7 +43,7 @@ impl Bound {
 #[cfg(feature = "hwloc")]
 impl Plan {
     /// Bind the calling thread to `placement`. Call this from the thread being
-    /// placed, as the first thing it does — memory binding only governs pages
+    /// placed, as the first thing it does: memory binding only governs pages
     /// touched after it is set.
     pub fn bind_shard(&self, placement: &ShardPlacement) -> Bound {
         self.bind_current(std::slice::from_ref(&placement.cpu), placement.node)
@@ -72,8 +72,8 @@ impl Plan {
 
         // Both calls are gated on hwloc's own support probe rather than on their
         // return value, because the return value is not trustworthy on its own:
-        // asked to bind against a topology that is not this machine — a
-        // synthetic description, an XML capture — hwloc returns success without
+        // asked to bind against a topology that is not this machine: a
+        // synthetic description, an XML capture: hwloc returns success without
         // binding anything. Reporting that as `cpu: true` would make every test
         // on a synthetic machine claim placement it did not get.
         //
@@ -107,7 +107,7 @@ impl Plan {
 /// They are deliberately not errors. A plan built by the fallback already says
 /// `can_bind_cpu: false` and carries a note explaining why, the runtime's
 /// `TopologyReport` will show nothing pinned, and `PinPolicy::Require` refuses
-/// to start at all — so the shortfall is visible at three levels before any
+/// to start at all, so the shortfall is visible at three levels before any
 /// timing is measured. Making the calls themselves fail would only force every
 /// caller to handle a case that is already reported.
 #[cfg(not(feature = "hwloc"))]
@@ -150,8 +150,8 @@ mod tests {
 
     #[test]
     fn binding_against_a_synthetic_machine_reports_failure_rather_than_pretending() {
-        // hwloc answers `Ok(())` here. It has not bound anything and cannot —
-        // the topology describes a machine that is not this one — but the call
+        // hwloc answers `Ok(())` here. It has not bound anything and cannot,
+        // the topology describes a machine that is not this one, but the call
         // succeeds, so a `Bound` derived from the return value alone would claim
         // placement that never happened, on every test in this crate.
         let layout = plan(&synthetic(), &Workload::default(), None);
@@ -192,7 +192,7 @@ mod tests {
 
     #[test]
     fn binding_to_this_machine_is_attempted_and_answers_consistently() {
-        // The live machine may or may not support binding — macOS does not — so
+        // The live machine may or may not support binding: macOS does not, so
         // the assertion is consistency, not success: the plan's advertised
         // support must agree with what binding actually returns.
         let topology = Topology::new().expect("read this machine");
@@ -201,8 +201,8 @@ mod tests {
         let bound = layout.bind_shard(placement);
 
         // Undo it before asserting. On a platform where this worked, leaving it
-        // in place would pin the whole test binary — every later test in this
-        // process — to one CPU.
+        // in place would pin the whole test binary: every later test in this
+        // process: to one CPU.
         let all = topology.cpuset().clone_target();
         let _ = topology.bind_cpu(&all, CpuBindingFlags::THREAD);
 

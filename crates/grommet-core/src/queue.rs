@@ -23,7 +23,7 @@
 //!
 //! It holds because `alloc` returns either an index it took off the free list
 //! (which was itself allocated earlier) or `nodes.len()` immediately before
-//! pushing, and because `nodes` is never shortened — there is no `remove`,
+//! pushing, and because `nodes` is never shortened: there is no `remove`,
 //! `truncate`, `clear` or `shrink` anywhere in this file, so an index that was
 //! valid once stays valid for the life of the slab. Freed nodes are recycled
 //! through the free list rather than removed.

@@ -8,21 +8,21 @@ use std::hash::Hash;
 pub trait ShardKey: Copy + Eq + Hash + Send + 'static {
     /// A value derived from this key's identity. The router applies its own
     /// avalanche step afterwards, so returning the raw identity is both correct
-    /// and the cheapest option — there is no need to hash here.
+    /// and the cheapest option: there is no need to hash here.
     fn shard_hash(&self) -> u64;
 }
 
 /// An idempotency key: the caller-stable identity of one logical operation,
 /// which a retry reuses.
 ///
-/// Any exact, hashable identity works — a `u64` sequence number, a ULID or UUID
+/// Any exact, hashable identity works: a `u64` sequence number, a ULID or UUID
 /// as `u128`, a `(session, seq)` pair. It is deliberately not narrowed to one
 /// representation, and deliberately not hashed down to a fixed width, because a
 /// collision here would suppress work that was never a duplicate.
 ///
 /// The runtime uses this only to coalesce duplicates that are *concurrently*
-/// live for the same key. Durable deduplication — answering a retry that
-/// arrives after the original completed, with the original's outcome — needs
+/// live for the same key. Durable deduplication: answering a retry that
+/// arrives after the original completed, with the original's outcome: needs
 /// the authoritative store and belongs in your processor.
 pub trait RequestId: Clone + Eq + Hash + Send + 'static {}
 
