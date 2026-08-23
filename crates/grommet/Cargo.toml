@@ -18,7 +18,10 @@ categories = ["asynchronous", "concurrency", "network-programming"]
 unexpected_cfgs = { level = "deny", check-cfg = ["cfg(coverage)", "cfg(loom)"] }
 
 [dependencies]
+# `CachePadded`: the outstanding set's ready words are written by other
+# threads and read by the owner, so they must not share a cache line.
 ahash = "0.8"
+crossbeam-utils = "0.8"
 futures = "0.3"
 tokio = { version = "1", features = ["rt", "sync", "time", "macros"] }
 grommet-core = { workspace = true }

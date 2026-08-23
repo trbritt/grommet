@@ -13,8 +13,11 @@ use futures::stream::{FuturesUnordered, StreamExt};
 use grommet::metrics::ShardStats;
 use grommet::{Clock, ManualClock, Router, ShardConfig, SystemClock, mix, shard};
 use grommet_core::{Admit, Completion, Config, Disposition, Scheduler};
+use std::future::Future;
 use std::hint::black_box;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
 type AccountRouter = Router<AccountCall, ManualClock>;
@@ -275,6 +278,157 @@ fn submission(c: &mut Criterion) {
     group.finish();
 }
 
+/// A saturated reactor: thousands of futures live at once.
+///
+/// The `reactor` group above measures the loop's per-item cost, and does it
+/// with at most a few dozen futures resident — its processor never suspends,
+/// so a dispatch is polled once and gone. That is the wrong shape for asking
+/// what the outstanding set's *storage* costs, because a set holding sixty-four
+/// futures fits in cache whatever layout it uses.
+///
+/// This group holds thousands. Every key's work suspends once before finishing,
+/// so the whole in-flight budget is resident across a harvest boundary and the
+/// set is scanned as the many-word structure it becomes at that size. This is
+/// where contiguous storage, the summary bitmap and the scan cursor either earn
+/// their keep or do not.
+fn saturated(c: &mut Criterion) {
+    /// Suspends exactly once, waking itself, so its slot stays occupied across
+    /// a harvest and is polled again on the next one.
+    struct PendOnce(bool);
+
+    impl Future for PendOnce {
+        type Output = ();
+
+        fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+            if self.0 {
+                return Poll::Ready(());
+            }
+            self.0 = true;
+            cx.waker().wake_by_ref();
+            Poll::Pending
+        }
+    }
+
+    #[derive(Debug)]
+    struct Job(u64);
+
+    impl grommet::Work for Job {
+        type Key = u64;
+        type Id = ();
+
+        fn key(&self) -> u64 {
+            self.0
+        }
+
+        fn class(&self) -> grommet::ClassId {
+            0
+        }
+    }
+
+    /// Deliberately trivial apart from the suspension: what is being measured
+    /// is the reactor holding the future, not the future doing anything.
+    #[derive(Clone, Copy)]
+    struct Suspending;
+
+    impl grommet::Processor for Suspending {
+        type Work = grommet::Call<Job, ()>;
+        type State = ();
+        type Error = std::convert::Infallible;
+
+        async fn process(
+            &self,
+            _key: u64,
+            _state: Option<()>,
+            call: grommet::Call<Job, ()>,
+        ) -> Result<Disposition<()>, Self::Error> {
+            let (_job, responder) = call.into_parts();
+            PendOnce(false).await;
+            responder.send(());
+            Ok(Disposition::Keep(()))
+        }
+    }
+
+    type JobRouter = Router<grommet::Call<Job, ()>, ManualClock>;
+
+    struct Saturated {
+        router: Arc<JobRouter>,
+        runtime: tokio::runtime::Runtime,
+        worker: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl Saturated {
+        fn new(inflight: usize) -> Self {
+            let clock = ManualClock::new();
+            let (tx, rx) = grommet::channel(8192);
+            let router = Arc::new(JobRouter::new(vec![tx], clock.clone()));
+            let mut cfg = ShardConfig::new([inflight, 8]);
+            cfg.scheduler.max_pending = 16_384;
+            cfg.scheduler.queue_reserve = cfg.scheduler.max_pending;
+            // The outstanding set is sized from the budgets plus the flush
+            // reserve, and its ready bitmap is capped, so the reserve is
+            // trimmed to leave the budget the room it needs.
+            cfg.flush_slots = 64;
+
+            let worker = std::thread::Builder::new()
+                .name("bench-saturated".to_owned())
+                .spawn(move || {
+                    let runtime =
+                        tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+                    runtime.block_on(shard::run(
+                        rx,
+                        Suspending,
+                        clock,
+                        Arc::new(ShardStats::default()),
+                        cfg,
+                    ));
+                })
+                .unwrap();
+
+            Self {
+                router,
+                runtime: tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(2)
+                    .enable_all()
+                    .build()
+                    .unwrap(),
+                worker: Some(worker),
+            }
+        }
+    }
+
+    impl Drop for Saturated {
+        fn drop(&mut self) {
+            self.router = Arc::new(JobRouter::new(vec![grommet::channel(1).0], ManualClock::new()));
+            if let Some(worker) = self.worker.take() {
+                let _ = worker.join();
+            }
+        }
+    }
+
+    let mut group = c.benchmark_group("saturated");
+    group.sample_size(20);
+
+    // Each key holds one dispatch, so the key count is how many futures are
+    // resident at once. The set crosses from one ready word to many between the
+    // first and second of these.
+    for keys in [64u64, 512, 2_048, 3_000, 8_192] {
+        let harness = Saturated::new(keys as usize + 64);
+        let router = harness.router.clone();
+        group.throughput(Throughput::Elements(keys));
+        group.bench_with_input(BenchmarkId::new("live_futures", keys), &keys, |b, _| {
+            b.to_async(&harness.runtime).iter(|| {
+                let router = router.clone();
+                async move {
+                    let calls = (0..keys).map(|key| router.call(Job(key)));
+                    let replies: Vec<_> = calls.collect::<FuturesUnordered<_>>().collect().await;
+                    black_box(replies)
+                }
+            });
+        });
+    }
+    group.finish();
+}
+
 fn reactor(c: &mut Criterion) {
     const CALLS: u64 = 64;
     let mut group = c.benchmark_group("reactor");
@@ -328,5 +482,5 @@ fn reactor(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, domain, scheduler, timer, submission, reactor);
+criterion_group!(benches, domain, scheduler, timer, submission, reactor, saturated);
 criterion_main!(benches);

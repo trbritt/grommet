@@ -352,7 +352,11 @@ where
     F: Future<Output = OutcomeOf<P>>,
 {
     let mut abort = false;
-    let report = outstanding.harvest(cfg.complete_batch, |outcome| match outcome {
+    // Clamped, not trusted: the set takes a zero cap literally and polls
+    // nothing, and `ShardConfig` has public fields a caller can set by hand. A
+    // shard that harvested nothing would never complete anything, so zero is
+    // read as one rather than as a request to stop.
+    let report = outstanding.harvest(cfg.complete_batch.max(1), |outcome| match outcome {
         Outcome::Ran { completion, request_id, panicked, fallout } => {
             hot.bump(&hot.completed);
             if let Some(fallout) = fallout {
@@ -564,7 +568,7 @@ pub async fn run<P, C, const CLASSES: usize>(
 
             // A truncated harvest counts as progress: its wakes are already
             // spent, so waiting now would strand the bits it handed back.
-            if admitted > 0 || harvest.finished > 0 || fired || harvest.truncated {
+            if admitted > 0 || harvest.finished > 0 || fired || harvest.more_ready {
                 continue;
             }
 
