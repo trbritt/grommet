@@ -3,8 +3,7 @@
 </p>
 
 <p align="center">
-  A hardware-aware work scheduler for Rust: key-affine dispatch and CPU-bound
-  offload, hosted on the async runtime you already use.
+  Thread-per-core, key-affine work scheduling for Rust.
 </p>
 
 <p align="center">
