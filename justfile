@@ -31,6 +31,21 @@ doc-test:
 doc:
     RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
 
+# Documentation exactly as docs.rs will build it.
+#
+# `doc` above builds with default features, which is not what gets published:
+# docs.rs reads `[package.metadata.docs.rs]`, and that turns defaults off to
+# avoid the vendored libhwloc download. A feature the crate cannot compile
+# without is therefore invisible to every other gate here, and shows up as a
+# failed build on the release. This reads the same metadata rather than
+# restating it, so the check cannot drift from what docs.rs actually does.
+doc-docsrs:
+    cargo docs-rs -p grommet
+    cargo docs-rs -p grommet-core
+    cargo docs-rs -p grommet-topology
+    cargo docs-rs -p grommet-offload
+    cargo docs-rs -p grommet-testkit
+
 # Every driver the shard can be hosted on.
 #
 # The loop is identical across drivers and only the host shim differs, so what

@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "accounts"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "ahash",
  "axum",
@@ -938,7 +938,7 @@ checksum = "e4eba85ea1d0a966a983acd07deee566e67395d2d96b6fb39e62b5a833f1eb0b"
 
 [[package]]
 name = "grommet"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "ahash",
  "crossbeam-utils",
@@ -951,7 +951,7 @@ dependencies = [
 
 [[package]]
 name = "grommet-core"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "ahash",
  "grommet-macros",
@@ -959,11 +959,11 @@ dependencies = [
 
 [[package]]
 name = "grommet-macros"
-version = "0.1.2"
+version = "0.1.3"
 
 [[package]]
 name = "grommet-offload"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "grommet",
  "rayon",
@@ -972,7 +972,7 @@ dependencies = [
 
 [[package]]
 name = "grommet-testkit"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "grommet",
  "grommet-core",
@@ -981,7 +981,7 @@ dependencies = [
 
 [[package]]
 name = "grommet-topology"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "hwlocality",
 ]

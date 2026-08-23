@@ -138,8 +138,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@v2
         with:
-          tool: just,protoc
+          tool: just,protoc,cargo-docs-rs
       - run: just doc
+      # What docs.rs will actually build, which is not the default feature set.
+      - run: just doc-docsrs
 
   package:
     runs-on: ubuntu-latest
