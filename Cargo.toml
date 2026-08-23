@@ -5,7 +5,7 @@ members = ["crates/*", "examples/accounts"]
 # Shared by every member. `description`, `keywords` and `categories` stay
 # per-crate: they are what tells the six apart on crates.io.
 [workspace.package]
-version = "0.1.2"
+version = "0.1.3"
 edition = "2024"
 rust-version = "1.88.0"
 authors = ["Tristan Britt <hello@tbritt.xyz>"]
@@ -25,12 +25,12 @@ exclude = [
 ]
 
 [workspace.dependencies]
-grommet = { version = "0.1.2", path = "crates/grommet", default-features = false }
-grommet-core = { version = "0.1.2", path = "crates/grommet-core" }
-grommet-macros = { version = "0.1.2", path = "crates/grommet-macros" }
-grommet-offload = { version = "0.1.2", path = "crates/grommet-offload", default-features = false }
-grommet-testkit = { version = "0.1.2", path = "crates/grommet-testkit", default-features = false }
-grommet-topology = { version = "0.1.2", path = "crates/grommet-topology", default-features = false }
+grommet = { version = "0.1.3", path = "crates/grommet", default-features = false }
+grommet-core = { version = "0.1.3", path = "crates/grommet-core" }
+grommet-macros = { version = "0.1.3", path = "crates/grommet-macros" }
+grommet-offload = { version = "0.1.3", path = "crates/grommet-offload", default-features = false }
+grommet-testkit = { version = "0.1.3", path = "crates/grommet-testkit", default-features = false }
+grommet-topology = { version = "0.1.3", path = "crates/grommet-topology", default-features = false }
 
 [profile.release]
 opt-level     = 3

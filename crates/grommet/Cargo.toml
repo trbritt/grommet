@@ -68,10 +68,13 @@ tokio = { version = "1", features = ["rt", "sync", "time", "macros", "test-util"
 [target.'cfg(loom)'.dependencies]
 loom = "0.7"
 
-# See `grommet-topology`: the vendored libhwloc build needs network access,
-# which a docs.rs build does not have. `topology` is named explicitly so the
+# The vendored libhwloc build needs network access, which docs.rs does not
+# have, so defaults are off. Both features are then named explicitly: without
+# `driver-tokio` a shard has no host to wait on and the crate refuses to
+# compile, and without `topology` the documentation would describe the
+# pure-Rust fallback rather than the crate. `topology` is named explicitly so the
 # documentation still describes the default configuration rather than the
 # pure-Rust opt-out.
 [package.metadata.docs.rs]
 no-default-features = true
-features = ["topology"]
+features = ["driver-tokio", "topology"]
