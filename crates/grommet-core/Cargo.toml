@@ -15,8 +15,15 @@ keywords = ["scheduler", "fairness", "round-robin", "queue", "sharding"]
 categories = ["data-structures", "concurrency", "algorithms"]
 
 [lints.rust]
-unexpected_cfgs = { level = "deny", check-cfg = ["cfg(coverage)"] }
+unexpected_cfgs = { level = "deny", check-cfg = ["cfg(coverage)", "cfg(loom)"] }
 
 [dependencies]
 ahash = "0.8"
 grommet-macros = { workspace = true }
+
+# Loom builds compile the crate itself with modeled atomics and a checked
+# `UnsafeCell`, so the dependency cannot be dev-only; gating it behind
+# `--cfg loom` keeps it out of every ordinary build. Same arrangement as
+# `grommet`, and the one tokio itself uses.
+[target.'cfg(loom)'.dependencies]
+loom = "0.7"

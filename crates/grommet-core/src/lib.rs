@@ -1,8 +1,10 @@
 //! Key-affine fair scheduling as a pure data structure.
 //!
-//! There is no async, no clock, no IO, no thread and no allocation policy here
-//! beyond the queues this module owns. Time is an explicit monotonic
-//! [`Duration`] supplied by the caller, and work items are opaque payloads.
+//! There is no async, no clock, no IO and no allocation policy here beyond the
+//! queues this module owns. Time is an explicit monotonic [`Duration`] supplied
+//! by the caller, and work items are opaque payloads. The one exception is
+//! [`waker_slot`], which is here for unsafe containment rather than because it
+//! is part of the scheduling model; see below.
 //!
 //! # Fairness model
 //!
@@ -30,8 +32,19 @@
 //! ready rings from the per-key queues, so the opportunity is removed rather
 //! than documented away.
 //!
-//! Unsafe code is confined to the queue slab, which documents and
-//! debug-asserts the one invariant it relies on.
+//! # Unsafe code
+//!
+//! This crate is where the workspace keeps its unsafe, so that there is one
+//! place to audit rather than a policy with exceptions. Two modules use it: the
+//! queue slab, which indexes without bounds checks, and
+//! [`waker_slot`], which guards an `Option<Waker>` with a two-bit lock. Each
+//! states its invariant at the top of the file, `debug_assert!`s it at every
+//! use, and is checked by a model test under Miri. Every other crate in the
+//! workspace is `#![deny(unsafe_code)]`.
+//!
+//! [`waker_slot`] is the one thing here that touches a thread: it is a
+//! synchronization primitive rather than a scheduling one, and it lives here
+//! for containment rather than because it belongs to the scheduling model.
 
 #![deny(unsafe_code)]
 
@@ -44,6 +57,11 @@ use std::hash::Hash;
 use std::time::Duration;
 
 pub mod timer;
+// Not part of the documented surface: this is a workspace-internal seam that
+// happens to need a crate boundary, and publishing it would commit this crate
+// to a synchronization primitive in its API.
+#[doc(hidden)]
+pub mod waker_slot;
 
 mod queue;
 use queue::{List, Slab};

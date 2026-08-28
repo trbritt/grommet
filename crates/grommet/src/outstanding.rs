@@ -3,7 +3,9 @@
 //! `Outstanding` is specialized for a reactor with one owning thread, one
 //! concrete future type, a fixed in-flight budget, and wakes that may arrive
 //! from other threads.  Push, polling, completion, and slot reuse remain on the
-//! owner.  Other threads see only atomic readiness words and one `AtomicWaker`.
+//! owner.  Other threads see only atomic readiness words and one [`Doorbell`].
+//!
+//! [`Doorbell`]: crate::doorbell::Doorbell
 //!
 //! [`BoxedOutstanding`] preallocates one `Pin<Box<Option<F>>>` per slot,
 //! allocates every future slot and waker at construction, drops a future the
@@ -20,7 +22,7 @@
 //! A slot waker publishes its bit with `Release`.  A word's `0 -> nonzero`
 //! transition publishes that word in the summary bitmap, and a slot's
 //! `0 -> 1` transition wakes the registered owner.  Repeated wakes therefore
-//! coalesce without repeatedly contending on the summary or `AtomicWaker`.
+//! coalesce without repeatedly contending on the summary or the doorbell.
 //! Harvesting takes the bitmaps with `Acquire`.  A mark racing a take is
 //! observed either by that take or by the next one; restoration uses atomic OR
 //! and therefore cannot overwrite a concurrent mark.
@@ -33,8 +35,10 @@
 //! true circular fairness across word boundaries under capped harvesting.
 //!
 //! The owner must register before the readiness check on which parking relies.
-//! [`BoxedOutstanding::poll_harvest`] encodes that order.  A wake concurrent with the final `more_ready` check may
-//! arrive just after the check, but the registered owner is then scheduled.
+//! That discipline and its proof live in [`crate::doorbell`];
+//! [`BoxedOutstanding::poll_harvest`] encodes the order here.  A wake
+//! concurrent with the final `more_ready` check may arrive just after the
+//! check, but the registered owner is then scheduled.
 //!
 //! # Stale wakes
 //!
@@ -114,8 +118,8 @@
 //! real at sixty-four live futures can vanish entirely at three thousand.  For a trading loop,
 //! p99.99 and maximum cycles per reactor turn matter more than mean throughput.
 
+use crate::doorbell::Doorbell;
 use crossbeam_utils::CachePadded;
-use futures::task::AtomicWaker;
 use std::fmt;
 use std::future::Future;
 use std::marker::PhantomData;
@@ -124,9 +128,9 @@ use std::sync::Arc;
 use std::task::{Context, Poll, Wake, Waker};
 
 #[cfg(loom)]
-use loom::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use loom::sync::atomic::{AtomicU64, Ordering};
 #[cfg(not(loom))]
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 const WORD_BITS: usize = 64;
 
@@ -325,20 +329,22 @@ impl ReadySet {
 
 struct Shared {
     ready: ReadySet,
-    owner: AtomicWaker,
-    closed: AtomicBool,
+    bell: Doorbell,
 }
 
 impl Shared {
     #[inline]
     fn notify(&self, slot: usize) {
-        if self.closed.load(Ordering::Acquire) {
+        // Checked before the mark rather than only inside `ring`: once the set
+        // is gone nobody will read these bits again, so publishing one is pure
+        // cost on a path stale wakers keep taking.
+        if self.bell.is_closed() {
             return;
         }
         if self.ready.mark(slot) {
-            // Closing may race this notification.  AtomicWaker permits wake
-            // racing take; a final wake across the close boundary is harmless.
-            self.owner.wake();
+            // Closing may race this notification.  `Doorbell` orders the two,
+            // and a final wake across the close boundary is harmless.
+            self.bell.ring();
         }
     }
 }
@@ -581,8 +587,8 @@ impl<'a> RestoreGuard<'a> {
         self.deferred_bits = 0;
         self.armed = false;
 
-        if wake_owner && had_work && !self.shared.closed.load(Ordering::Acquire) {
-            self.shared.owner.wake();
+        if wake_owner && had_work {
+            self.shared.bell.ring();
         }
     }
 
@@ -692,11 +698,7 @@ impl<F: Future, S: Storage<F>> Inner<F, S> {
 
         let storage = S::with_capacity(capacity);
         debug_assert_eq!(storage.capacity(), capacity);
-        let shared = Arc::new(Shared {
-            ready: ReadySet::new(capacity),
-            owner: AtomicWaker::new(),
-            closed: AtomicBool::new(false),
-        });
+        let shared = Arc::new(Shared { ready: ReadySet::new(capacity), bell: Doorbell::new() });
         let wakers = (0..capacity)
             .map(|slot| Waker::from(Arc::new(SlotWaker { shared: shared.clone(), slot })))
             .collect();
@@ -734,7 +736,7 @@ impl<F: Future, S: Storage<F>> Inner<F, S> {
 
     #[inline]
     fn register_owner(&self, waker: &Waker) {
-        self.shared.owner.register(waker);
+        self.shared.bell.register(waker);
     }
 
     #[inline]
@@ -927,8 +929,7 @@ impl<F: Future, S: Storage<F>> Drop for Inner<F, S> {
     fn drop(&mut self) {
         // Prevent retained stale slot wakers from retaining or scheduling the
         // owner task after this set is gone.
-        self.shared.closed.store(true, Ordering::Release);
-        drop(self.shared.owner.take());
+        self.shared.bell.close();
     }
 }
 
@@ -1422,9 +1423,10 @@ mod tests {
     }
 }
 
-/// Loom models the atomics owned by this module.  `AtomicWaker` itself is kept
-/// as the futures crate implementation and is relied upon according to its
-/// documented register-before-check contract.
+/// Loom models the readiness bitmap owned by this module.  Wake delivery is
+/// not modelled here: it belongs to [`crate::doorbell`], whose own models cover
+/// the register-before-check and ring-versus-close races.  The `AtomicBool`
+/// below therefore stands in for a wake rather than performing one.
 #[cfg(all(test, loom))]
 mod loom_tests {
     use super::{ReadySet, low_mask};

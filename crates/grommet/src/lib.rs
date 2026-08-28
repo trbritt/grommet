@@ -101,6 +101,7 @@
 #![deny(unsafe_code)]
 
 pub mod clock;
+pub(crate) mod doorbell;
 pub(crate) mod driver;
 pub mod error;
 pub mod key;

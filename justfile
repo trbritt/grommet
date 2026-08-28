@@ -105,11 +105,12 @@ sim:
 # bits and the register-early discipline the parked loop depends on. Release,
 # because loom explores every ordering and a debug build multiplies that.
 loom:
-    RUSTFLAGS="--cfg loom" cargo test -p grommet --lib --release loom_
+    RUSTFLAGS="--cfg loom" cargo test -p grommet -p grommet-core --lib --release loom_
 
-# The scheduler slab is the only unsafe code in the workspace. Miri runs its
-# randomized model test against reference queues, which is what makes the
-# unchecked indexing there worth anything.
+# `grommet-core` holds the workspace's only unsafe: the scheduler slab and the
+# waker slot. Miri runs the slab's randomized model test against reference
+# queues, and the slot's threaded register/wake race, which is what makes the
+# unchecked indexing and the two-bit cell lock worth anything.
 miri:
     cargo miri test -p grommet-core --lib
 

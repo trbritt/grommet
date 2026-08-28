@@ -207,7 +207,8 @@ just test       # the fast gate: formatting, strict Clippy, tests, doctests
 just doc        # rustdoc with warnings denied, as docs.rs will build it
 just package    # every crate is packageable for crates.io
 just sim        # optimized deterministic simulation with fault injection
-just miri       # undefined-behaviour check over the scheduler's unsafe slab
+just miri       # undefined-behaviour check over the two unsafe modules
+just loom       # exhaustive interleavings of the wake protocol
 just coverage   # MC/DC instrumentation and a decision-layer line gate
 just mutants    # assertion-strength check under the simulation configuration
 just fuzz-list  # exact Bolero target names (run before fuzzing)
@@ -219,12 +220,25 @@ just bench      # domain, scheduler and full-reactor baselines
 
 ### Unsafe code
 
-There is exactly one unsafe module: the queue slab in `grommet-core`, which
-indexes without bounds checks. Every index it dereferences is one it allocated
-itself, never caller data, and that invariant is stated at the top of the file,
-`debug_assert!`ed at every use, and checked by a randomized model test against
-reference queues that runs under Miri in CI. Every other crate is
-`#![deny(unsafe_code)]`.
+Unsafe code lives in exactly one crate, `grommet-core`, so that there is one
+place to audit rather than a policy with exceptions. Two modules use it, and
+every other crate in the workspace is `#![deny(unsafe_code)]`.
+
+The **queue slab** indexes without bounds checks. Every index it dereferences is
+one it allocated itself, never caller data.
+
+The **waker slot** guards an `Option<Waker>` with a two-bit lock, so that a
+notification arriving from another core costs an atomic rather than a lock, and
+so that a notifier never blocks behind the shard it is notifying. It is a
+`futures::task::AtomicWaker` in algorithm; it is written out here because that
+one is built on `core::sync::atomic`, which loom cannot instrument, and loom's
+own is a mutex-based mock. Owning it is what lets the wake protocol be
+model-checked as the code that actually ships.
+
+Both state their invariant at the top of the file, `debug_assert!` it at every
+use, and are checked by model tests that run under Miri in CI — a randomized
+comparison against reference queues for the slab, and a threaded register/wake
+race for the slot. The slot is additionally model-checked by loom.
 
 ### Evidence domains
 
