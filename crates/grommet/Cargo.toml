@@ -23,6 +23,11 @@ unexpected_cfgs = { level = "deny", check-cfg = ["cfg(coverage)", "cfg(loom)"] }
 ahash = "0.8"
 crossbeam-utils = "0.8"
 futures = "0.3"
+# The wait list's lock. Never taken on a drain that has no waiters, so this is
+# a backpressure-path primitive rather than a hot-path one — but where a lock is
+# taken at all it should be this one: no poisoning to unwrap through, one byte
+# of state, and no allocation on contention.
+parking_lot = "0.12"
 tokio = { version = "1", features = ["rt", "sync", "time", "macros"] }
 grommet-core = { workspace = true }
 # `default-features = false` so both switches below — whether to use hwloc at

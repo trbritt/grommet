@@ -116,6 +116,7 @@ pub mod router;
 pub mod scheduler;
 pub mod shard;
 pub mod topology;
+pub(crate) mod waiters;
 pub mod work;
 
 pub use clock::{Clock, ManualClock, SystemClock};

@@ -132,9 +132,12 @@ starts unpinned and quietly measures the OS scheduler instead of this one.
   and fails if it ever exceeds one rotation.
 - **Independent class budgets.** A flood of compute work fills the compute
   budget and ring only, leaving IO free to keep dispatching.
-- **End-to-end backpressure.** At the pending cap a shard stops admitting, its
-  bounded mailbox fills, and `Router::submit` suspends the caller. `try_submit`
-  sheds instead, handing the work back so you can answer your client.
+- **End-to-end backpressure, first come first served.** At the pending cap a
+  shard stops admitting, its bounded mailbox fills, and `Router::submit`
+  suspends the caller. Suspended submitters are let back in in the order they
+  arrived, so a steady stream of new arrivals cannot starve one that has been
+  waiting. `try_submit` sheds instead, handing the work back so you can answer
+  your client.
 - **Deadlines cost nothing to miss.** Work past its deadline is discarded at
   dispatch, before it spends a turn.
 - **Contained panics.** A panicking `process` future cannot unwind the reactor.
