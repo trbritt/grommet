@@ -221,8 +221,9 @@ just bench      # domain, scheduler and full-reactor baselines
 ### Unsafe code
 
 Unsafe code lives in exactly one crate, `grommet-core`, so that there is one
-place to audit rather than a policy with exceptions. Two modules use it, and
-every other crate in the workspace is `#![deny(unsafe_code)]`.
+place to audit rather than a policy with exceptions. Every other crate in the
+workspace is `#![deny(unsafe_code)]`, and inside `grommet-core` it is confined
+to modules that opt back in one at a time.
 
 The **queue slab** indexes without bounds checks. Every index it dereferences is
 one it allocated itself, never caller data.
@@ -235,10 +236,20 @@ one is built on `core::sync::atomic`, which loom cannot instrument, and loom's
 own is a mutex-based mock. Owning it is what lets the wake protocol be
 model-checked as the code that actually ships.
 
-Both state their invariant at the top of the file, `debug_assert!` it at every
-use, and are checked by model tests that run under Miri in CI — a randomized
-comparison against reference queues for the slab, and a threaded register/wake
-race for the slot. The slot is additionally model-checked by loom.
+The **ring** is the bounded MPSC a shard's mailbox drains. One consumer means
+its read position is a plain field rather than a contended cursor, so draining
+costs no read-modify-write at all, and a slot that a producer has claimed but
+not yet published reads as *nothing right now* rather than as something to spin
+on — a reactor has other work and comes back next turn.
+
+Each states its invariant at the top of its file, `debug_assert!`s it at every
+use, and is checked by a model test that runs under Miri in CI: a randomized
+comparison against reference queues for the slab, a threaded register/wake race
+for the slot, and concurrent producers against a draining consumer for the ring.
+The last two are additionally model-checked by loom, which verifies their
+exclusion arguments mechanically — a slot read that escaped its stamp fails the
+model as a causality violation rather than passing as undefined behaviour that
+happens not to bite.
 
 ### Evidence domains
 

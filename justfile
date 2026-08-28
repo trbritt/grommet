@@ -107,10 +107,11 @@ sim:
 loom:
     RUSTFLAGS="--cfg loom" cargo test -p grommet -p grommet-core --lib --release loom_
 
-# `grommet-core` holds the workspace's only unsafe: the scheduler slab and the
-# waker slot. Miri runs the slab's randomized model test against reference
-# queues, and the slot's threaded register/wake race, which is what makes the
-# unchecked indexing and the two-bit cell lock worth anything.
+# `grommet-core` holds the workspace's only unsafe: the scheduler slab, the
+# waker slot and the mailbox ring. Miri runs the slab's randomized model test
+# against reference queues, the slot's threaded register/wake race, and the
+# ring's concurrent producers, which is what makes the unchecked indexing and
+# the two cell protocols worth anything.
 miri:
     cargo miri test -p grommet-core --lib
 

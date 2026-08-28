@@ -48,6 +48,7 @@
 //! soundness should not rest on a discipline that is merely intended.
 #![allow(unsafe_code)]
 
+use crate::cell::UnsafeCell;
 use std::task::Waker;
 
 #[cfg(loom)]
@@ -62,52 +63,6 @@ const WAITING: usize = 0;
 const REGISTERING: usize = 0b01;
 /// A thread is taking the waker to wake it.
 const WAKING: usize = 0b10;
-
-/// `loom::cell::UnsafeCell` and `std::cell::UnsafeCell` have different shapes:
-/// loom hands out access through a closure so it can bracket the access and
-/// detect overlapping ones. This presents the loom shape on both, so the code
-/// below is written once and is checked under loom.
-#[cfg(not(loom))]
-mod cell {
-    #[derive(Debug)]
-    pub(super) struct UnsafeCell<T>(std::cell::UnsafeCell<T>);
-
-    impl<T> UnsafeCell<T> {
-        pub(super) const fn new(data: T) -> Self {
-            Self(std::cell::UnsafeCell::new(data))
-        }
-
-        /// # Safety
-        ///
-        /// The caller must hold the module's cell lock; see the safety
-        /// invariant in the module documentation.
-        pub(super) unsafe fn with_mut<R>(&self, f: impl FnOnce(*mut T) -> R) -> R {
-            f(self.0.get())
-        }
-    }
-}
-
-#[cfg(loom)]
-mod cell {
-    #[derive(Debug)]
-    pub(super) struct UnsafeCell<T>(loom::cell::UnsafeCell<T>);
-
-    impl<T> UnsafeCell<T> {
-        pub(super) fn new(data: T) -> Self {
-            Self(loom::cell::UnsafeCell::new(data))
-        }
-
-        /// # Safety
-        ///
-        /// As above. Loom additionally checks the invariant at runtime and
-        /// panics on an overlapping access, which is the point of this shape.
-        pub(super) unsafe fn with_mut<R>(&self, f: impl FnOnce(*mut T) -> R) -> R {
-            self.0.with_mut(f)
-        }
-    }
-}
-
-use cell::UnsafeCell;
 
 /// Where the owner's waker lives between turns.
 pub struct WakerSlot {

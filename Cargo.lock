@@ -954,6 +954,7 @@ name = "grommet-core"
 version = "0.1.3"
 dependencies = [
  "ahash",
+ "crossbeam-utils",
  "grommet-macros",
  "loom",
 ]

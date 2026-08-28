@@ -19,6 +19,9 @@ unexpected_cfgs = { level = "deny", check-cfg = ["cfg(coverage)", "cfg(loom)"] }
 
 [dependencies]
 ahash = "0.8"
+# `CachePadded`: the ring's tail is written by every producer and must not share
+# a line with the slots the consumer is reading.
+crossbeam-utils = "0.8"
 grommet-macros = { workspace = true }
 
 # Loom builds compile the crate itself with modeled atomics and a checked

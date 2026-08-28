@@ -184,8 +184,9 @@ jobs:
       - run: just coverage
 
   # `grommet-core` holds the workspace's only unsafe: the scheduler slab, which
-  # indexes without bounds checks, and the waker slot, which guards a cell with
-  # a two-bit lock. This is what checks the invariants they rely on.
+  # indexes without bounds checks, and the waker slot and mailbox ring, which
+  # each guard a cell with their own protocol. This is what checks the
+  # invariants they rely on.
   undefined-behaviour:
     runs-on: ubuntu-latest
     steps:
