@@ -1,8 +1,10 @@
 //! Key-affine fair scheduling as a pure data structure.
 //!
-//! There is no async, no clock, no IO, no thread and no allocation policy here
-//! beyond the queues this module owns. Time is an explicit monotonic
-//! [`Duration`] supplied by the caller, and work items are opaque payloads.
+//! There is no async, no clock, no IO and no allocation policy here beyond the
+//! queues this module owns. Time is an explicit monotonic [`Duration`] supplied
+//! by the caller, and work items are opaque payloads. The exceptions are
+//! [`ring`] and [`waker_slot`], which are here for unsafe containment rather
+//! than because they are part of the scheduling model; see below.
 //!
 //! # Fairness model
 //!
@@ -30,8 +32,26 @@
 //! ready rings from the per-key queues, so the opportunity is removed rather
 //! than documented away.
 //!
-//! Unsafe code is confined to the queue slab, which documents and
-//! debug-asserts the one invariant it relies on.
+//! # Unsafe code
+//!
+//! This crate is where the workspace keeps its unsafe, so that there is one
+//! place to audit rather than a policy with exceptions. Every other crate is
+//! `#![deny(unsafe_code)]`, and here it is confined to modules that opt back in
+//! one at a time:
+//!
+//! - the **queue slab**, which indexes without bounds checks;
+//! - [`waker_slot`], which guards an `Option<Waker>` with a two-bit lock;
+//! - [`ring`], which guards a slot's value with a publication stamp;
+//! - the **cell** shim the last two share, which is one constructor and one
+//!   accessor and exists so that both present loom's checked `UnsafeCell` shape
+//!   rather than each rolling its own.
+//!
+//! Each states the invariant it relies on at the top of its file,
+//! `debug_assert!`s it at every use, and is checked by a model test under Miri.
+//! The two synchronization primitives are additionally model-checked by loom,
+//! which verifies the exclusion arguments mechanically: a slot read that
+//! escaped its stamp fails the model as a causality violation rather than
+//! passing as undefined behaviour that happens not to bite.
 
 #![deny(unsafe_code)]
 
@@ -43,7 +63,16 @@ use std::collections::hash_map::Entry;
 use std::hash::Hash;
 use std::time::Duration;
 
+mod cell;
+
 pub mod timer;
+// Not part of the documented surface: this is a workspace-internal seam that
+// happens to need a crate boundary, and publishing it would commit this crate
+// to a synchronization primitive in its API.
+#[doc(hidden)]
+pub mod ring;
+#[doc(hidden)]
+pub mod waker_slot;
 
 mod queue;
 use queue::{List, Slab};

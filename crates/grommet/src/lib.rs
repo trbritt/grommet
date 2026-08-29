@@ -101,6 +101,7 @@
 #![deny(unsafe_code)]
 
 pub mod clock;
+pub(crate) mod doorbell;
 pub(crate) mod driver;
 pub mod error;
 pub mod key;
@@ -115,6 +116,7 @@ pub mod router;
 pub mod scheduler;
 pub mod shard;
 pub mod topology;
+pub(crate) mod waiters;
 pub mod work;
 
 pub use clock::{Clock, ManualClock, SystemClock};

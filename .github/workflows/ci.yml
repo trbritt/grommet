@@ -183,8 +183,10 @@ jobs:
       - run: just sim
       - run: just coverage
 
-  # The scheduler slab indexes without bounds checks; this is what checks the
-  # invariant it relies on.
+  # `grommet-core` holds the workspace's only unsafe: the scheduler slab, which
+  # indexes without bounds checks, and the waker slot and mailbox ring, which
+  # each guard a cell with their own protocol. This is what checks the
+  # invariants they rely on.
   undefined-behaviour:
     runs-on: ubuntu-latest
     steps:
@@ -197,6 +199,24 @@ jobs:
         with:
           tool: just
       - run: just miri
+
+  # The companion gate to the one above. Miri checks that the accesses are sound
+  # under the interleavings it happens to run; loom enumerates the interleavings
+  # themselves, which is what the wake protocol's lost-wakeup freedom rests on.
+  # Release, because loom explores every ordering and a debug build multiplies
+  # that; the cache is what keeps the vendored libhwloc build off the clock.
+  interleavings:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-05-01
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
+      - run: just loom
 
   nightly:
     if: github.event_name == 'schedule'

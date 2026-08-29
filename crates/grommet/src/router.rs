@@ -19,6 +19,56 @@ use std::time::Duration;
 /// bytes each.
 const SLOTS_PER_SHARD: usize = 64;
 
+/// Shards a batch can defer announcements for, as words of a bitmap. Sixty-four
+/// bytes of stack covers more shards than a thread-per-core runtime has cores
+/// on any machine this targets; a topology past it still works, and only loses
+/// the amortization for the shards beyond.
+const DEFERRED_WORDS: usize = 8;
+const DEFERRED_SHARDS: usize = DEFERRED_WORDS * 64;
+
+/// Shards holding items that have been pushed but not yet announced.
+///
+/// A batch pushes into each shard's ring and tells that shard once at the end,
+/// rather than once per item. What that saves is the sequentially consistent
+/// fence each announcement carries — the doorbell coalesces the wake itself
+/// either way — so a batch of sixty-four items for one key's shard pays one
+/// fence instead of sixty-four.
+#[derive(Default)]
+struct Deferred {
+    words: [u64; DEFERRED_WORDS],
+    any: bool,
+}
+
+impl Deferred {
+    /// Note that `shard` is holding an unannounced push. Returns `false` if it
+    /// is outside what this tracks, which the caller answers by announcing now.
+    #[inline]
+    fn defer(&mut self, shard: usize) -> bool {
+        if shard >= DEFERRED_SHARDS {
+            return false;
+        }
+        self.words[shard / 64] |= 1 << (shard % 64);
+        self.any = true;
+        true
+    }
+
+    /// Announce to every shard holding a deferred push, and forget them.
+    fn announce<W: Work>(&mut self, shards: &[Mailbox<Envelope<W>>]) {
+        if !self.any {
+            return;
+        }
+        for (word, bits) in self.words.iter_mut().enumerate() {
+            let mut set = std::mem::take(bits);
+            while set != 0 {
+                let shard = word * 64 + set.trailing_zeros() as usize;
+                set &= set - 1;
+                shards[shard].announce();
+            }
+        }
+        self.any = false;
+    }
+}
+
 /// Why a submission did not reach a shard. Each variant hands the work back, so
 /// the caller can shed it deliberately: answer the client, count it, or retry
 /// somewhere else: rather than discovering it was dropped.
@@ -206,12 +256,31 @@ impl<W: Work, C: Clock, const CLASSES: usize> Router<W, C, CLASSES> {
     {
         let arrival = self.arrival();
         let mut batch = BatchError::default();
+        let mut deferred = Deferred::default();
         for item in work {
-            match self.stamp(item, arrival) {
-                Ok(envelope) => batch.record(self.send(envelope).await),
-                Err(error) => batch.rejected.push(error),
+            let envelope = match self.stamp(item, arrival) {
+                Ok(envelope) => envelope,
+                Err(error) => {
+                    batch.rejected.push(error);
+                    continue;
+                }
+            };
+            match self.try_send_deferred(envelope, &mut deferred) {
+                Ok(()) => batch.record(Ok(())),
+                Err(SubmitError::Full(work)) => {
+                    // Everything pushed so far has to be announced before this
+                    // waits, and this is the whole reason deferral is confined
+                    // to this module. A batch that waits while holding back its
+                    // own announcements is waiting for room on a shard that its
+                    // unannounced items would have woken, and no longer a slow
+                    // batch but a stopped one.
+                    deferred.announce(&self.shards);
+                    batch.record(self.send_work(work, arrival).await);
+                }
+                Err(error) => batch.record(Err(error)),
             }
         }
+        deferred.announce(&self.shards);
         batch.into_result()
     }
 
@@ -229,12 +298,14 @@ impl<W: Work, C: Clock, const CLASSES: usize> Router<W, C, CLASSES> {
     {
         let arrival = self.arrival();
         let mut batch = BatchError::default();
+        let mut deferred = Deferred::default();
         for item in work {
             match self.stamp(item, arrival) {
-                Ok(envelope) => batch.record(self.try_send(envelope)),
+                Ok(envelope) => batch.record(self.try_send_deferred(envelope, &mut deferred)),
                 Err(error) => batch.rejected.push(error),
             }
         }
+        deferred.announce(&self.shards);
         batch.into_result()
     }
 
@@ -244,6 +315,38 @@ impl<W: Work, C: Clock, const CLASSES: usize> Router<W, C, CLASSES> {
             .send(envelope)
             .await
             .map_err(|closed| SubmitError::ShardDown(closed.into_inner().work))
+    }
+
+    /// Push without announcing, recording the shard so the batch can announce
+    /// it once at the end.
+    fn try_send_deferred(
+        &self,
+        envelope: Envelope<W>,
+        deferred: &mut Deferred,
+    ) -> Result<(), SubmitError<W>> {
+        let index = self.shard_index(envelope.key);
+        match self.shards[index].try_send_deferred(envelope) {
+            Ok(()) => {
+                if !deferred.defer(index) {
+                    self.shards[index].announce();
+                }
+                Ok(())
+            }
+            Err(TrySendError::Full(envelope)) => Err(SubmitError::Full(envelope.work)),
+            Err(TrySendError::Closed(envelope)) => Err(SubmitError::ShardDown(envelope.work)),
+        }
+    }
+
+    /// Re-stamp work handed back by a full mailbox and wait for room.
+    ///
+    /// The arrival instant is the batch's, not a fresh reading: the caller held
+    /// these items at one instant, and a wait for mailbox space is queueing,
+    /// which is exactly what a deadline is meant to account for.
+    async fn send_work(&self, work: W, arrival: Option<Duration>) -> Result<(), SubmitError<W>> {
+        match self.stamp(work, arrival) {
+            Ok(envelope) => self.send(envelope).await,
+            Err(error) => Err(error),
+        }
     }
 
     fn try_send(&self, envelope: Envelope<W>) -> Result<(), SubmitError<W>> {
@@ -531,5 +634,125 @@ mod tests {
             let skew = (count as f64 - fair as f64).abs() / fair as f64;
             assert!(skew < 0.05, "shard skew {skew} exceeds the slot table's bound");
         }
+    }
+}
+
+#[cfg(test)]
+mod batching_tests {
+    use super::*;
+    use crate::clock::ManualClock;
+    use crate::mailbox::channel;
+    use grommet_core::ClassId;
+    use std::future::Future;
+
+    #[derive(Debug)]
+    struct Item(u64);
+
+    impl Work for Item {
+        type Key = u64;
+        type Id = ();
+        fn key(&self) -> u64 {
+            self.0
+        }
+        fn class(&self) -> ClassId {
+            0
+        }
+        fn time_to_live(&self) -> Option<Duration> {
+            None
+        }
+        fn request_id(&self) -> Option<()> {
+            None
+        }
+    }
+
+    /// Turns a batch that stops into a failure rather than a hung suite.
+    async fn before_long<F: Future>(future: F) -> F::Output {
+        tokio::time::timeout(std::time::Duration::from_secs(5), future)
+            .await
+            .expect("a batch waited on a shard it never announced to")
+    }
+
+    /// The hazard deferral introduces, and the reason it is confined to this
+    /// module. A batch deep enough to fill a mailbox has to wait partway
+    /// through — and the shard it waits on is holding the very items whose
+    /// announcement it deferred. Skip that announcement and the batch is not
+    /// slow, it is stopped.
+    #[tokio::test]
+    async fn a_batch_that_fills_a_mailbox_announces_before_it_waits() {
+        let (tx, mut rx) = channel(2);
+        let router = Router::<Item, ManualClock, 2>::new(vec![tx], ManualClock::new());
+
+        // Parks on an empty mailbox, so nothing but the doorbell will run it.
+        let drainer = tokio::spawn(async move {
+            let mut seen = Vec::new();
+            while let Some(envelope) = rx.recv().await {
+                seen.push(envelope.key());
+            }
+            seen
+        });
+        tokio::task::yield_now().await;
+
+        // Two fill the mailbox; the third has to wait for the parked shard.
+        before_long(router.submit_batch((0..3).map(Item))).await.expect("every shard is alive");
+        drop(router);
+
+        assert_eq!(before_long(drainer).await.unwrap(), [0, 1, 2]);
+    }
+
+    /// Every shard a batch touched is announced to, not just the last one.
+    #[tokio::test]
+    async fn a_batch_spanning_shards_wakes_every_shard_it_touched() {
+        let (first, mut left) = channel(8);
+        let (second, mut right) = channel(8);
+        let router = Router::<Item, ManualClock, 2>::new(vec![first, second], ManualClock::new());
+
+        let here = (0..1000).find(|key| router.shard_index(*key) == 0).expect("shard 0 owns one");
+        let there = (0..1000).find(|key| router.shard_index(*key) == 1).expect("shard 1 owns one");
+
+        let both = tokio::spawn(async move {
+            let a = left.recv().await.expect("shard 0 was announced to");
+            let b = right.recv().await.expect("shard 1 was announced to");
+            (a.key(), b.key())
+        });
+        tokio::task::yield_now().await;
+
+        router.try_submit_batch(vec![Item(here), Item(there)]).expect("both shards are alive");
+        assert_eq!(before_long(both).await.unwrap(), (here, there));
+    }
+
+    /// A shedding batch still tells the shard, even though nothing in it waits.
+    #[tokio::test]
+    async fn a_shedding_batch_announces_what_it_landed() {
+        let (tx, mut rx) = channel(2);
+        let router = Router::<Item, ManualClock, 2>::new(vec![tx], ManualClock::new());
+
+        let drainer = tokio::spawn(async move { rx.recv().await.map(|e| e.key()) });
+        tokio::task::yield_now().await;
+
+        // Three into two slots: two land, one is shed, and the two that landed
+        // still have to reach a parked shard.
+        let error = router.try_submit_batch((0..3).map(Item)).expect_err("the third is shed");
+        assert_eq!(error.submitted(), 2);
+        assert_eq!(before_long(drainer).await.unwrap(), Some(0));
+    }
+
+    #[test]
+    fn deferral_tracks_shards_it_covers_and_declines_the_rest() {
+        let mut deferred = Deferred::default();
+        assert!(!deferred.any, "nothing deferred yet");
+
+        assert!(deferred.defer(0));
+        assert!(deferred.defer(63));
+        assert!(deferred.defer(64));
+        assert!(deferred.defer(DEFERRED_SHARDS - 1));
+        assert_eq!(deferred.words[0], (1 << 63) | 1);
+        assert_eq!(deferred.words[1], 1);
+        assert_eq!(deferred.words[DEFERRED_WORDS - 1], 1 << 63);
+
+        // Past what the bitmap covers the caller is told to announce itself,
+        // which is why an unusually wide topology loses the amortization rather
+        // than losing a wake.
+        assert!(!deferred.defer(DEFERRED_SHARDS));
+        assert!(!deferred.defer(usize::MAX));
     }
 }

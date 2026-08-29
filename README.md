@@ -132,9 +132,12 @@ starts unpinned and quietly measures the OS scheduler instead of this one.
   and fails if it ever exceeds one rotation.
 - **Independent class budgets.** A flood of compute work fills the compute
   budget and ring only, leaving IO free to keep dispatching.
-- **End-to-end backpressure.** At the pending cap a shard stops admitting, its
-  bounded mailbox fills, and `Router::submit` suspends the caller. `try_submit`
-  sheds instead, handing the work back so you can answer your client.
+- **End-to-end backpressure, first come first served.** At the pending cap a
+  shard stops admitting, its bounded mailbox fills, and `Router::submit`
+  suspends the caller. Suspended submitters are let back in in the order they
+  arrived, so a steady stream of new arrivals cannot starve one that has been
+  waiting. `try_submit` sheds instead, handing the work back so you can answer
+  your client.
 - **Deadlines cost nothing to miss.** Work past its deadline is discarded at
   dispatch, before it spends a turn.
 - **Contained panics.** A panicking `process` future cannot unwind the reactor.
@@ -207,7 +210,8 @@ just test       # the fast gate: formatting, strict Clippy, tests, doctests
 just doc        # rustdoc with warnings denied, as docs.rs will build it
 just package    # every crate is packageable for crates.io
 just sim        # optimized deterministic simulation with fault injection
-just miri       # undefined-behaviour check over the scheduler's unsafe slab
+just miri       # undefined-behaviour check over the two unsafe modules
+just loom       # exhaustive interleavings of the wake protocol
 just coverage   # MC/DC instrumentation and a decision-layer line gate
 just mutants    # assertion-strength check under the simulation configuration
 just fuzz-list  # exact Bolero target names (run before fuzzing)
@@ -219,12 +223,36 @@ just bench      # domain, scheduler and full-reactor baselines
 
 ### Unsafe code
 
-There is exactly one unsafe module: the queue slab in `grommet-core`, which
-indexes without bounds checks. Every index it dereferences is one it allocated
-itself, never caller data, and that invariant is stated at the top of the file,
-`debug_assert!`ed at every use, and checked by a randomized model test against
-reference queues that runs under Miri in CI. Every other crate is
-`#![deny(unsafe_code)]`.
+Unsafe code lives in exactly one crate, `grommet-core`, so that there is one
+place to audit rather than a policy with exceptions. Every other crate in the
+workspace is `#![deny(unsafe_code)]`, and inside `grommet-core` it is confined
+to modules that opt back in one at a time.
+
+The **queue slab** indexes without bounds checks. Every index it dereferences is
+one it allocated itself, never caller data.
+
+The **waker slot** guards an `Option<Waker>` with a two-bit lock, so that a
+notification arriving from another core costs an atomic rather than a lock, and
+so that a notifier never blocks behind the shard it is notifying. It is a
+`futures::task::AtomicWaker` in algorithm; it is written out here because that
+one is built on `core::sync::atomic`, which loom cannot instrument, and loom's
+own is a mutex-based mock. Owning it is what lets the wake protocol be
+model-checked as the code that actually ships.
+
+The **ring** is the bounded MPSC a shard's mailbox drains. One consumer means
+its read position is a plain field rather than a contended cursor, so draining
+costs no read-modify-write at all, and a slot that a producer has claimed but
+not yet published reads as *nothing right now* rather than as something to spin
+on — a reactor has other work and comes back next turn.
+
+Each states its invariant at the top of its file, `debug_assert!`s it at every
+use, and is checked by a model test that runs under Miri in CI: a randomized
+comparison against reference queues for the slab, a threaded register/wake race
+for the slot, and concurrent producers against a draining consumer for the ring.
+The last two are additionally model-checked by loom, which verifies their
+exclusion arguments mechanically — a slot read that escaped its stamp fails the
+model as a causality violation rather than passing as undefined behaviour that
+happens not to bite.
 
 ### Evidence domains
 

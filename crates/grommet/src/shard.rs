@@ -329,6 +329,11 @@ fn drain_inbox<P: Processor, C: Clock, const CLASSES: usize>(
             Poll::Pending => break,
         }
     }
+    // The drain is over, however it ended. Budget exhaustion and a saturated
+    // scheduler both leave items queued, so this is the only thing that tells a
+    // sender parked on a full mailbox that the slots it has been waiting for
+    // came free.
+    rx.release_capacity();
     taken
 }
 
@@ -710,6 +715,87 @@ mod tests {
         fn on_expired(&self, key: u64, _work: Item) {
             self.log.borrow_mut().expired.push(key);
         }
+    }
+
+    /// Holds every dispatch until the test releases it, so the shard can be
+    /// pinned in the state where it stops draining its mailbox altogether.
+    #[derive(Clone)]
+    struct Held {
+        log: Rc<RefCell<Log>>,
+        gate: Rc<tokio::sync::Semaphore>,
+    }
+
+    impl Processor for Held {
+        type Work = Item;
+        type State = u64;
+        type Error = Fault;
+
+        async fn process(
+            &self,
+            key: u64,
+            state: Option<u64>,
+            _work: Item,
+        ) -> Result<Disposition<Self::State>, Fault> {
+            self.log.borrow_mut().processed.push((key, state));
+            self.gate.acquire().await.expect("the gate stays open").forget();
+            Ok(Disposition::Keep(state.unwrap_or(0) + 1))
+        }
+    }
+
+    /// A saturated shard stops draining its mailbox entirely: the admission
+    /// loop's own guard is what ends the drain, so no poll of the mailbox ever
+    /// observes it empty. The slots that drain freed still have to reach the
+    /// submitter waiting for them, or it waits on room that is already there.
+    ///
+    /// This is the one place that proves the shard hands its capacity back. The
+    /// mailbox's own tests drive that release directly, so they would pass
+    /// whether or not the shard ever calls it.
+    #[tokio::test]
+    async fn a_submitter_is_admitted_even_while_the_shard_is_too_saturated_to_drain() {
+        let log = Rc::new(RefCell::new(Log::default()));
+        let gate = Rc::new(tokio::sync::Semaphore::new(0));
+        let processor = Held { log: Rc::clone(&log), gate: Rc::clone(&gate) };
+        let clock = ManualClock::new();
+
+        // Two mailbox slots, and a scheduler that saturates once it holds two
+        // items: the shard takes both and then stops.
+        let (tx, rx) = crate::mailbox::channel(2);
+        let router = Router::<Item, ManualClock, 2>::new(vec![tx], clock.clone());
+        let mut cfg = config();
+        cfg.scheduler.max_pending = 2;
+        let stats = Arc::new(ShardStats::<2>::default());
+
+        let engine = run(rx, processor, clock.clone(), stats, cfg);
+        let router = Arc::new(router);
+        let driver = async move {
+            // Fills the mailbox.
+            router.try_submit(Item::new(1)).expect("the mailbox is empty");
+            router.try_submit(Item::new(2)).expect("the mailbox has a second slot");
+
+            // On its own task, and that is load-bearing. `join!` polls every
+            // unfinished branch each time it is polled, so a submitter driven
+            // from this future would be re-polled whenever the shard was woken
+            // and would find room whether or not anyone had told it about the
+            // room — which is precisely the bug being tested for. A spawned
+            // task is polled only when something actually wakes it.
+            let waiting = {
+                let router = Arc::clone(&router);
+                tokio::spawn(async move { router.submit(Item::new(3)).await })
+            };
+            waiting.await.expect("the submitting task did not panic").expect("the shard is there");
+
+            // Everything is queued; let the held dispatches finish and drain.
+            gate.add_permits(8);
+            drop(router);
+        };
+        // Bounded, so a shard that never hands its capacity back fails here
+        // rather than hanging whoever is running the suite.
+        tokio::time::timeout(Duration::from_secs(5), async { tokio::join!(engine, driver) })
+            .await
+            .expect("a submitter waited on room that was already free");
+
+        let processed: Vec<u64> = log.borrow().processed.iter().map(|&(key, _)| key).collect();
+        assert_eq!(processed, [1, 2, 3]);
     }
 
     fn config() -> ShardConfig<2> {
