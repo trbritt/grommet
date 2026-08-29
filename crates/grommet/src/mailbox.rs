@@ -143,10 +143,18 @@ impl<W> Mailbox<W> {
     /// arrived, so a steady stream of new submitters cannot starve one that has
     /// been waiting.
     ///
-    /// Cancel-safe: dropping this future before it completes hands the item
-    /// back by dropping it, removes the caller from the queue, and — if a slot
-    /// had already been set aside — passes that slot to the next sender in line
-    /// rather than stranding them.
+    /// # Cancel safety
+    ///
+    /// At every point this future can be suspended, the item has not been sent:
+    /// it is pushed and the result returned without an intervening await, so
+    /// there is no state in which a dropped future has half-submitted
+    /// something. Dropping it before it completes therefore drops the item
+    /// without sending it, which is what makes it safe as a `select!` branch —
+    /// a branch that loses its race did not submit.
+    ///
+    /// Dropping also gives up the caller's place in the queue, and if a slot
+    /// had already been set aside for it, passes that slot to the next sender
+    /// in line rather than letting it strand them.
     pub async fn send(&self, item: W) -> Result<(), Closed<W>> {
         let full = match self.try_send(item) {
             Ok(()) => return Ok(()),
@@ -307,7 +315,7 @@ impl<W> Inbox<W> {
 
         // The burst is over: hand back what it freed before going to sleep on
         // the assumption that nothing more is coming.
-        self.release();
+        self.release_capacity();
 
         // Read before the last look at the ring, not after. Zero producers
         // means every sender had already dropped, and each one published
@@ -321,7 +329,7 @@ impl<W> Inbox<W> {
 
         if let Some(item) = self.take() {
             self.unpark();
-            self.release();
+            self.release_capacity();
             return Poll::Ready(Some(item));
         }
         if closed {
@@ -337,7 +345,7 @@ impl<W> Inbox<W> {
         // afterwards is conclusive.
         let closed = self.shared.producers.load(Ordering::Acquire) == 0;
         let item = self.take();
-        self.release();
+        self.release_capacity();
         match item {
             Some(item) => Ok(item),
             None if closed => Err(TryRecvError::Closed),
@@ -354,12 +362,23 @@ impl<W> Inbox<W> {
         Some(item)
     }
 
-    /// Hand this burst's freed slots to the senders waiting for them.
+    /// Hand this drain's freed slots to the senders waiting for them.
     ///
     /// The fence pairs with the one a parking sender performs, and is why a
     /// sender cannot come to rest while the room it wanted is already there.
-    /// Nothing was freed means nothing to hand back and no fence to pay for.
-    fn release(&mut self) {
+    /// Nothing freed means nothing to hand back and no fence to pay for, so
+    /// calling this more often than necessary is free.
+    ///
+    /// **A reactor must call this when it stops draining.** [`poll_recv`] does
+    /// it on the paths that find the mailbox empty, but those are not the only
+    /// ways a drain ends: a shard also stops when its admission budget runs out
+    /// or its scheduler saturates, and under load those are the usual ones. A
+    /// drain that ended without releasing has freed slots that no waiting
+    /// sender has been told about, which is how a submitter starves in front of
+    /// a mailbox with room in it.
+    ///
+    /// [`poll_recv`]: Inbox::poll_recv
+    pub(crate) fn release_capacity(&mut self) {
         if self.freed == 0 {
             return;
         }
@@ -749,5 +768,46 @@ mod loom_tests {
             drop(send);
             drop(inbox);
         });
+    }
+}
+
+#[cfg(all(test, not(loom)))]
+mod starvation_tests {
+    use super::*;
+    use std::future::Future;
+    use std::time::Duration;
+
+    async fn before_long<F: Future>(future: F) -> F::Output {
+        tokio::time::timeout(Duration::from_secs(5), future)
+            .await
+            .expect("a waiting sender was never admitted")
+    }
+
+    /// A shard stops draining when its admission budget runs out or its
+    /// scheduler saturates, both of which leave items still queued — so a drain
+    /// that only ever sees `Ready` is the common case under load, not an edge
+    /// one. The slots it freed have to reach the senders waiting for them
+    /// anyway.
+    #[tokio::test]
+    async fn a_drain_that_stops_before_the_mailbox_empties_still_admits_a_waiting_sender() {
+        let (mailbox, mut inbox) = channel(2);
+        mailbox.try_send(1).unwrap();
+        mailbox.try_send(2).unwrap();
+
+        let sender = mailbox.clone();
+        let waiting = tokio::spawn(async move { sender.send(3).await });
+        tokio::task::yield_now().await;
+
+        // One item taken, and then the shard turns to its other work without
+        // ever observing an empty mailbox.
+        let waker = futures::task::noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        assert!(matches!(inbox.poll_recv(&mut cx), Poll::Ready(Some(1))));
+        inbox.release_capacity();
+
+        // A slot came free and a sender has been waiting for exactly that.
+        before_long(waiting).await.unwrap().unwrap();
+        assert_eq!(inbox.try_recv(), Ok(2));
+        assert_eq!(inbox.try_recv(), Ok(3));
     }
 }
