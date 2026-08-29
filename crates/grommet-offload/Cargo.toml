@@ -19,7 +19,9 @@ unexpected_cfgs = { level = "deny", check-cfg = ["cfg(coverage)"] }
 
 [dependencies]
 rayon = "1"
-tokio = { version = "1", features = ["sync"] }
+# The permit bound and the result channel. Both used to be tokio's, which put a
+# runtime in the graph of a crate that only runs Rayon tasks; neither needs one.
+futures-channel = { version = "0.3", default-features = false, features = ["std"] }
 grommet = { workspace = true }
 
 [features]

@@ -47,12 +47,17 @@
 //! given back rather than held for the life of the mailbox.
 
 use std::collections::VecDeque;
-use std::task::Waker;
+use std::task::{Poll, Waker};
 
 #[cfg(loom)]
 use loom::sync::atomic::{AtomicUsize, Ordering};
 #[cfg(not(loom))]
 use std::sync::atomic::{AtomicUsize, Ordering};
+
+#[cfg(loom)]
+use loom::sync::atomic::fence;
+#[cfg(not(loom))]
+use std::sync::atomic::fence;
 
 // Under loom the lock is loom's, so that the protocol built on it is explored
 // rather than assumed. That is a weaker substitution than it would be for the
@@ -69,6 +74,16 @@ use parking_lot::Mutex;
 type Guard<'a, T> = loom::sync::MutexGuard<'a, T>;
 #[cfg(not(loom))]
 type Guard<'a, T> = parking_lot::MutexGuard<'a, T>;
+
+/// One attempt at whatever a parked caller is waiting for.
+pub(crate) enum Attempt<T> {
+    /// Got it.
+    Ready(T),
+    /// Not yet. Park and try again when woken.
+    Retry,
+    /// Never going to happen, so stop waiting rather than park again.
+    Closed,
+}
 
 /// A parked sender's claim on its registration.
 ///
@@ -291,6 +306,61 @@ impl Waiters {
         self.waiting.store(live, Ordering::Release);
     }
 
+    /// Park in arrival order until `attempt` succeeds.
+    ///
+    /// The whole waiting protocol, in one place, because both users of it need
+    /// exactly the same thing: announce before retrying, so that a release
+    /// landing between the retry and the registration is handed to somebody;
+    /// and fence between the two, because the waker on the other side is
+    /// storing one location and loading another in the opposite order. That is
+    /// the store-buffer shape, and acquire and release alone permit both sides
+    /// to miss each other.
+    ///
+    /// `attempt` runs once before anything is registered, so the uncontended
+    /// path takes no lock at all.
+    ///
+    /// # Cancel safety
+    ///
+    /// Dropping the returned future gives up the caller's place. If the caller
+    /// had already been woken, the wake is passed to the next in line rather
+    /// than discarded, which is the difference between a cancelled `select!`
+    /// branch and a starved one.
+    pub(crate) async fn park_until<T>(
+        &self,
+        mut attempt: impl FnMut() -> Attempt<T>,
+    ) -> Result<T, Closed> {
+        match attempt() {
+            Attempt::Ready(value) => return Ok(value),
+            Attempt::Closed => return Err(Closed),
+            Attempt::Retry => {}
+        }
+
+        let mut registration = Registration { waiters: self, ticket: None };
+        std::future::poll_fn(move |cx| {
+            match registration.ticket {
+                Some(ticket) => self.refresh(ticket, cx.waker()),
+                None => match self.park(cx.waker()) {
+                    Ok(ticket) => registration.ticket = Some(ticket),
+                    Err(Closed) => return Poll::Ready(Err(Closed)),
+                },
+            }
+            fence(Ordering::SeqCst);
+
+            match attempt() {
+                Attempt::Ready(value) => {
+                    registration.finish();
+                    Poll::Ready(Ok(value))
+                }
+                Attempt::Closed => {
+                    registration.finish();
+                    Poll::Ready(Err(Closed))
+                }
+                Attempt::Retry => Poll::Pending,
+            }
+        })
+        .await
+    }
+
     fn lock(&self) -> Guard<'_, Inner> {
         #[cfg(not(loom))]
         {
@@ -299,6 +369,37 @@ impl Waiters {
         #[cfg(loom)]
         {
             self.inner.lock().unwrap()
+        }
+    }
+}
+
+/// A parked caller's place in the queue, given up whichever way its future
+/// ends.
+struct Registration<'a> {
+    waiters: &'a Waiters,
+    ticket: Option<Ticket>,
+}
+
+impl Registration<'_> {
+    /// Give up the place because the wait is over. Any wake this caller
+    /// received was spent on the attempt that succeeded, so there is nothing to
+    /// pass on.
+    fn finish(&mut self) {
+        if let Some(ticket) = self.ticket.take() {
+            self.waiters.cancel(ticket);
+        }
+    }
+}
+
+impl Drop for Registration<'_> {
+    fn drop(&mut self) {
+        let Some(ticket) = self.ticket.take() else { return };
+        // `cancel` reporting the registration already over means something was
+        // set aside for a caller that is now walking away. Handing it to the
+        // next in line is what keeps a cancelled wait from starving one that
+        // is still waiting.
+        if !self.waiters.cancel(ticket) {
+            self.waiters.wake_one();
         }
     }
 }

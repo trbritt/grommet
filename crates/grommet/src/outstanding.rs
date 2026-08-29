@@ -1022,7 +1022,6 @@ pub type Outstanding<F> = BoxedOutstanding<F>;
 #[cfg(all(test, not(loom)))]
 mod tests {
     use super::*;
-    use futures::task::noop_waker;
     use std::collections::HashSet;
     use std::panic::{AssertUnwindSafe, catch_unwind};
     use std::sync::atomic::{AtomicUsize, Ordering as StdOrdering};
@@ -1403,8 +1402,7 @@ mod tests {
 
     #[test]
     fn poll_harvest_registers_before_checking() {
-        let owner = noop_waker();
-        let mut cx = Context::from_waker(&owner);
+        let mut cx = Context::from_waker(Waker::noop());
         let mut set = BoxedOutstanding::with_capacity(1);
         set.push(countdown(0, 7));
         let mut output = Vec::new();

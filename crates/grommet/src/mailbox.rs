@@ -48,7 +48,7 @@
 //! receive whether or not any sender is waiting.
 
 use crate::doorbell::Doorbell;
-use crate::waiters::{Ticket, Waiters};
+use crate::waiters::{Attempt, Waiters};
 use grommet_core::ring;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -156,48 +156,26 @@ impl<W> Mailbox<W> {
     /// had already been set aside for it, passes that slot to the next sender
     /// in line rather than letting it strand them.
     pub async fn send(&self, item: W) -> Result<(), Closed<W>> {
-        let full = match self.try_send(item) {
-            Ok(()) => return Ok(()),
-            Err(TrySendError::Closed(item)) => return Err(Closed(item)),
-            Err(TrySendError::Full(item)) => item,
-        };
-
-        let shared = &*self.shared;
-        let mut item = Some(full);
-        let mut registration = Registration { shared, ticket: None };
-
-        std::future::poll_fn(move |cx| {
-            let value = item.take().expect("the item is put back on every pending path");
-
-            // Announce before retrying. A slot freed between the retry and the
-            // registration would otherwise be handed to nobody.
-            match registration.ticket {
-                Some(ticket) => shared.waiters.refresh(ticket, cx.waker()),
-                None => match shared.waiters.park(cx.waker()) {
-                    Ok(ticket) => registration.ticket = Some(ticket),
-                    Err(_) => return Poll::Ready(Err(Closed(value))),
-                },
-            }
-            // The other half of the store-buffer pair; the shard fences after
-            // freeing a slot and before looking for someone to give it to.
-            fence(Ordering::SeqCst);
-
-            match self.try_send(value) {
-                Ok(()) => {
-                    registration.finish();
-                    Poll::Ready(Ok(()))
+        let mut item = Some(item);
+        let sent = self
+            .shared
+            .waiters
+            .park_until(|| {
+                let value = item.take().expect("the item is put back on every path that waits");
+                match self.try_send(value) {
+                    Ok(()) => Attempt::Ready(()),
+                    Err(TrySendError::Full(value)) => {
+                        item = Some(value);
+                        Attempt::Retry
+                    }
+                    Err(TrySendError::Closed(value)) => {
+                        item = Some(value);
+                        Attempt::Closed
+                    }
                 }
-                Err(TrySendError::Closed(value)) => {
-                    registration.finish();
-                    Poll::Ready(Err(Closed(value)))
-                }
-                Err(TrySendError::Full(value)) => {
-                    item = Some(value);
-                    Poll::Pending
-                }
-            }
-        })
-        .await
+            })
+            .await;
+        sent.map_err(|_| Closed(item.take().expect("a refused send returns the item")))
     }
 
     /// Submit without ever waiting, reporting a full mailbox instead.
@@ -261,35 +239,6 @@ impl<W> Shared<W> {
         fence(Ordering::SeqCst);
         if self.parked.load(Ordering::Relaxed) {
             self.bell.ring();
-        }
-    }
-}
-
-/// A sender's place in the queue, given up whichever way its future ends.
-struct Registration<'a, W> {
-    shared: &'a Shared<W>,
-    ticket: Option<Ticket>,
-}
-
-impl<W> Registration<'_, W> {
-    /// Give up the place because the item went through. Any wake this sender
-    /// received was spent on that push, so there is nothing to pass on.
-    fn finish(&mut self) {
-        if let Some(ticket) = self.ticket.take() {
-            self.shared.waiters.cancel(ticket);
-        }
-    }
-}
-
-impl<W> Drop for Registration<'_, W> {
-    fn drop(&mut self) {
-        let Some(ticket) = self.ticket.take() else { return };
-        // `cancel` reporting the registration already over means a slot was set
-        // aside for a sender that is now walking away. Handing it to the next
-        // in line is the difference between a cancelled `select!` branch and a
-        // starved submitter.
-        if !self.shared.waiters.cancel(ticket) {
-            self.shared.waiters.wake_one();
         }
     }
 }
@@ -829,8 +778,7 @@ mod starvation_tests {
 
         // One item taken, and then the shard turns to its other work without
         // ever observing an empty mailbox.
-        let waker = futures::task::noop_waker();
-        let mut cx = Context::from_waker(&waker);
+        let mut cx = Context::from_waker(std::task::Waker::noop());
         assert!(matches!(inbox.poll_recv(&mut cx), Poll::Ready(Some(1))));
         inbox.release_capacity();
 
