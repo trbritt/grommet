@@ -34,6 +34,11 @@ hdrhistogram = { version = "7", default-features = false }
 # taken at all it should be this one: no poisoning to unwrap through, one byte
 # of state, and no allocation on contention.
 parking_lot = "0.12"
+# The production clock. Reading time is on the reactor's hot path several times
+# per turn, and `Instant::now` costs about as much as two scheduler operations;
+# quanta reads the CPU's counter instead where the platform has a usable one,
+# and falls back to the OS clock where it does not.
+quanta = "0.12"
 tokio = { version = "1", features = ["rt", "sync", "time", "macros"] }
 grommet-core = { workspace = true }
 # `default-features = false` so both switches below, whether to use hwloc at
