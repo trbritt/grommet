@@ -203,21 +203,50 @@ impl<W> Mailbox<W> {
     /// Submit without ever waiting, reporting a full mailbox instead.
     #[inline]
     pub fn try_send(&self, item: W) -> Result<(), TrySendError<W>> {
+        let sent = self.try_send_deferred(item);
+        if sent.is_ok() {
+            self.announce();
+        }
+        sent
+    }
+
+    /// Push without telling the shard, leaving that to a later [`announce`].
+    ///
+    /// This exists so that a batch pays for one announcement per shard it
+    /// touched rather than one per item, which is most of what a batch saves:
+    /// the announcement carries a sequentially consistent fence, and the
+    /// doorbell coalesces the wake itself either way.
+    ///
+    /// Crate-private, and half of a pair. **A push left unannounced is an item
+    /// sitting in a ring that a sleeping shard has not been told about**, and
+    /// the way that shows up is not a slow batch but a stopped one: a caller
+    /// that defers a push and then waits for room is waiting on a shard that
+    /// its own unannounced items would have woken.
+    ///
+    /// [`announce`]: Mailbox::announce
+    #[inline]
+    pub(crate) fn try_send_deferred(&self, item: W) -> Result<(), TrySendError<W>> {
         let shared = &*self.shared;
         if shared.departed.load(Ordering::Acquire) {
             return Err(TrySendError::Closed(item));
         }
         match shared.ring.try_push(item) {
-            Ok(()) => {
-                shared.wake_shard();
-                Ok(())
-            }
+            Ok(()) => Ok(()),
             // Re-checked, so that a shard that went away while this was pushing
             // is reported as gone rather than as momentarily full: a caller
             // told "full" would retry forever.
             Err(item) if shared.departed.load(Ordering::Acquire) => Err(TrySendError::Closed(item)),
             Err(item) => Err(TrySendError::Full(item)),
         }
+    }
+
+    /// Tell the shard that items were pushed, if it is asleep.
+    ///
+    /// Idempotent, and cheap when the shard is running: a fence and a load,
+    /// reaching the doorbell only when there is somebody to wake.
+    #[inline]
+    pub(crate) fn announce(&self) {
+        self.shared.wake_shard();
     }
 }
 
