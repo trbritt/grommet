@@ -82,9 +82,10 @@ let balance = runtime.router().call(job).await?;
 | `grommet-macros` | The assertion macros the scheduler's invariant checks are written in. |
 | `examples/accounts` | A worked example, and the proof the abstractions survive use. |
 
-`grommet-core` depends on `ahash` and nothing else. `grommet` adds `tokio` and
-`futures`. Reading the machine lives in `grommet-topology`, which wraps
-`hwlocality`. Rayon is a separate crate you opt into.
+`grommet-core` depends on `ahash` and `crossbeam-utils`. `grommet` adds `tokio`,
+`futures`, `parking_lot` and `hdrhistogram`. Reading the machine lives in
+`grommet-topology`, which wraps `hwlocality`. Rayon is a separate crate you opt
+into.
 
 ## Features
 
@@ -203,6 +204,34 @@ said, and runs a grommet scheduler on it. Your processor keeps awaiting
   scheduler never asks again, so an inconsistent implementation cannot corrupt
   its rings.
 
+## Observability
+
+Each shard publishes its counters and gauges once per tick, from its own thread,
+into a `ShardStats` that an exporter reads. Nothing on the dispatch path is
+atomic: the shard writes plain cells and copies them across once a tick.
+
+Queue wait and processing time are HDR histograms rather than sums, because a
+mean hides exactly the distribution thread-per-core exists to control. A runtime
+that sells a starvation bound should be able to show its own tail. Recording is
+a bucket increment and never allocates.
+
+Percentiles do not average, so what is published is the distribution rather than
+precomputed quantiles. Merge the shards, then ask once:
+
+```rust
+let mut all = grommet::metrics::histogram();
+for shard in runtime.stats() {
+    shard.merge_queue_wait_into(&mut all);
+}
+println!("p99 {}ns", all.value_at_quantile(0.99));
+```
+
+`started`, `completed` and `expired` are also split by class, so one class
+starving behind another is visible rather than averaged away. Every other number
+describes work that finished, which is where a wedged future would hide, so
+`inflight_age_max_nanos` reports how long the oldest running dispatch has been
+running.
+
 ## Gates
 
 ```justfile
@@ -210,8 +239,8 @@ just test       # the fast gate: formatting, strict Clippy, tests, doctests
 just doc        # rustdoc with warnings denied, as docs.rs will build it
 just package    # every crate is packageable for crates.io
 just sim        # optimized deterministic simulation with fault injection
-just miri       # undefined-behaviour check over the two unsafe modules
-just loom       # exhaustive interleavings of the wake protocol
+just miri       # undefined-behaviour check over the unsafe modules
+just loom       # exhaustive interleavings of the ring, mailbox and wake protocol
 just coverage   # MC/DC instrumentation and a decision-layer line gate
 just mutants    # assertion-strength check under the simulation configuration
 just fuzz-list  # exact Bolero target names (run before fuzzing)
@@ -231,28 +260,24 @@ to modules that opt back in one at a time.
 The **queue slab** indexes without bounds checks. Every index it dereferences is
 one it allocated itself, never caller data.
 
-The **waker slot** guards an `Option<Waker>` with a two-bit lock, so that a
-notification arriving from another core costs an atomic rather than a lock, and
-so that a notifier never blocks behind the shard it is notifying. It is a
-`futures::task::AtomicWaker` in algorithm; it is written out here because that
-one is built on `core::sync::atomic`, which loom cannot instrument, and loom's
-own is a mutex-based mock. Owning it is what lets the wake protocol be
-model-checked as the code that actually ships.
+The **waker slot** guards an `Option<Waker>` with a two-bit lock, so a
+notification from another core costs an atomic rather than a lock, and a
+notifier never blocks behind the shard it is notifying. It is
+`futures::task::AtomicWaker` in algorithm, written out here because that one is
+built on `core::sync::atomic`, which loom cannot instrument.
 
 The **ring** is the bounded MPSC a shard's mailbox drains. One consumer means
 its read position is a plain field rather than a contended cursor, so draining
-costs no read-modify-write at all, and a slot that a producer has claimed but
-not yet published reads as *nothing right now* rather than as something to spin
-on — a reactor has other work and comes back next turn.
+costs no read-modify-write at all. A slot a producer has claimed but not yet
+published reads as nothing yet, rather than as something to spin on: a reactor
+has other work and comes back next turn.
 
 Each states its invariant at the top of its file, `debug_assert!`s it at every
-use, and is checked by a model test that runs under Miri in CI: a randomized
-comparison against reference queues for the slab, a threaded register/wake race
-for the slot, and concurrent producers against a draining consumer for the ring.
-The last two are additionally model-checked by loom, which verifies their
-exclusion arguments mechanically — a slot read that escaped its stamp fails the
-model as a causality violation rather than passing as undefined behaviour that
-happens not to bite.
+use, and is checked by a model test that runs under Miri in CI. The two
+synchronization primitives are model-checked by loom as well, which is the point
+of owning them: a slot read that escaped its stamp fails the model as a
+causality violation rather than passing as undefined behaviour that happens not
+to bite.
 
 ### Evidence domains
 

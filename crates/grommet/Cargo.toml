@@ -23,15 +23,21 @@ unexpected_cfgs = { level = "deny", check-cfg = ["cfg(coverage)", "cfg(loom)"] }
 ahash = "0.8"
 crossbeam-utils = "0.8"
 futures = "0.3"
+# Latency histograms. `default-features = false` drops serialization and the
+# cross-thread recorder, neither of which this uses: the shard records into a
+# histogram it owns and publishes it once per tick. Constructed with explicit
+# bounds, which turns auto-resizing off and makes recording allocation-free.
+# That is the property the hot path depends on, and `metrics` asserts it.
+hdrhistogram = { version = "7", default-features = false }
 # The wait list's lock. Never taken on a drain that has no waiters, so this is
-# a backpressure-path primitive rather than a hot-path one — but where a lock is
+# a backpressure-path primitive rather than a hot-path one. Where a lock is
 # taken at all it should be this one: no poisoning to unwrap through, one byte
 # of state, and no allocation on contention.
 parking_lot = "0.12"
 tokio = { version = "1", features = ["rt", "sync", "time", "macros"] }
 grommet-core = { workspace = true }
-# `default-features = false` so both switches below — whether to use hwloc at
-# all, and vendored versus system — are re-exported here rather than fixed. A
+# `default-features = false` so both switches below, whether to use hwloc at
+# all and vendored versus system, are re-exported here rather than fixed. A
 # Cargo feature cannot turn off a dependency's default, so a crate that wants
 # either choice has to be able to reach it from the top of the graph.
 grommet-topology = { workspace = true, default-features = false }
@@ -43,8 +49,8 @@ default = ["driver-tokio", "topology", "vendored"]
 #
 # On by default, because hardware-aware placement is what this runtime is for
 # and a default that cannot pin a thread would misrepresent it. Turning it off
-# with `default-features = false` gives a pure-Rust build in seconds — no C
-# toolchain, no build-time network fetch, and musl and air-gapped builds work —
+# with `default-features = false` gives a pure-Rust build in seconds: no C
+# toolchain, no build-time network fetch, and musl and air-gapped builds work,
 # at the cost of real placement: layout is planned from `available_parallelism`
 # alone and no thread is bound. `PinPolicy::Require` does not exist in that
 # build, so asking for placement you cannot get is a compile error rather than

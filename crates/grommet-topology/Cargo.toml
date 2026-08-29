@@ -31,7 +31,7 @@ hwlocality = { version = "1.0.0-alpha.12", features = ["hwloc-2_8_0"], optional 
 default = ["hwloc", "vendored"]
 
 # Discovery and binding through libhwloc. Without it the crate still plans and
-# still exposes `Plan`, `ShardPlacement` and `Workload` — it just plans from
+# still exposes `Plan`, `ShardPlacement` and `Workload`; it just plans from
 # `available_parallelism` and binds nothing. See `fallback`.
 hwloc = ["dep:hwlocality"]
 
@@ -43,13 +43,13 @@ hwloc = ["dep:hwlocality"]
 # The cost is real and worth stating: the build fetches the hwloc release over
 # the network and needs a C toolchain plus autotools, so it does not work
 # air-gapped. Turn it off with `default-features = false` to link the system
-# library instead — appropriate for distribution packaging, reproducible builds,
+# library instead, which suits distribution packaging, reproducible builds,
 # and any environment where the fetch is unacceptable.
 vendored = ["hwloc", "hwlocality/vendored"]
 
 # docs.rs has no network during the build, so the vendored libhwloc cannot be
 # compiled there. Documenting against a system library is what makes the docs
-# build at all — and `hwloc` is named explicitly, because this crate documented
+# build at all, and `hwloc` is named explicitly, because this crate documented
 # without it would describe the fallback rather than the crate.
 [package.metadata.docs.rs]
 no-default-features = true

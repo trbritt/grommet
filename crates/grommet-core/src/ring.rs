@@ -23,50 +23,47 @@
 //! when the stamp is.
 //!
 //! The consumer looks at one slot. If its stamp says published, it takes the
-//! value, releases the slot for the next lap, and advances its own position. If
-//! not, it returns `None` — and this is the part that differs from a general
-//! queue. "Not published" covers both an empty ring and a slot some producer
-//! has claimed but not yet filled. A queue with a linearizable `pop` has to
-//! tell those apart and therefore has to wait for the producer. A reactor does
-//! not: it treats both as *nothing right now*, goes and does its other work,
-//! and looks again on its next turn.
+//! value, releases the slot for the next lap, and advances its own position.
+//! Otherwise it returns `None`, and that is where this differs from a general
+//! queue: "not published" covers both an empty ring and a slot some producer
+//! has claimed but not yet filled. A linearizable `pop` has to tell those apart
+//! and so has to wait for the producer. A reactor does not. It treats both as
+//! nothing right now, does its other work, and looks again next turn.
 //!
 //! # Where spinning is and is not allowed
 //!
-//! The consumer never spins. That is the property this module exists to
-//! provide, and it is not a matter of degree: a shard's reactor holds timers,
-//! completions and dispatch behind its drain, so a backoff loop there does not
-//! cost throughput, it costs latency on everything else the turn was going to
-//! do. `pop` therefore looks at exactly one slot and returns.
+//! The consumer never spins. A shard's reactor holds timers, completions and
+//! dispatch behind its drain, so a backoff loop there does not cost throughput,
+//! it costs latency on everything else the turn was going to do. `pop` looks at
+//! one slot and returns.
 //!
-//! Producers are ordinary threads racing each other for a position, and there
-//! the opposite is true: they must back off. Two paths retry — losing the
-//! compare-exchange, and finding that someone advanced the tail mid-read — and
-//! the second is the common one under load, because every producer reads the
-//! tail before it acts on it. Going straight back around on either path turns
-//! ordinary contention into a storm on the single line they are all chasing.
-//! Backing off on both is worth an order of magnitude at eight producers, and
-//! it is the difference between a push cost that is flat in the number of
-//! producers and one that degrades linearly with it. Neither path ever waits on
-//! a *particular* thread: a producer that cannot get in reports a full ring
-//! rather than blocking behind whoever holds the claim.
+//! Producers race each other for a position, and there the opposite holds: they
+//! must back off. Two paths retry, losing the compare-exchange and finding that
+//! someone advanced the tail mid-read, and the second is the common one under
+//! load because every producer reads the tail before acting on it. Going
+//! straight back around on either turns ordinary contention into a storm on the
+//! one line they are all chasing. Backing off on both is worth an order of
+//! magnitude at eight producers: it is the difference between a push cost flat
+//! in the number of producers and one that degrades linearly with it.
+//!
+//! Neither path waits on a *particular* thread. A producer that cannot get in
+//! reports a full ring rather than blocking behind whoever holds the claim.
 //!
 //! # Why there is no `was_empty`
 //!
 //! It is tempting to have `try_push` report whether the ring had been empty, so
 //! the layer above can skip a wake when it was not. That signal is wrong here,
-//! and quietly so. The consumer can pop the last published item, then find the
-//! next slot claimed-but-unpublished, report empty and park — while the ring is
-//! not empty at all. The producer holding that claim then publishes, sees a
-//! non-empty ring, skips the wake, and the shard sleeps on work that is
-//! sitting in front of it.
+//! and quietly so. The consumer can pop the last published item, find the next
+//! slot claimed but unpublished, report empty and park, while the ring is not
+//! empty at all. The producer holding that claim then publishes, sees a
+//! non-empty ring, skips the wake, and the shard sleeps on work sitting in
+//! front of it.
 //!
-//! So this module does not offer the signal. Deciding when to wake belongs to
-//! the layer that owns the parking, and the correct form of that decision — a
-//! flag the consumer publishes before it parks, read by the producer after it
-//! publishes — is a store-buffer pattern that needs sequential consistency on
-//! both sides. Acquire and release alone permit both threads to miss each
-//! other.
+//! So the signal is not offered. Deciding when to wake belongs to the layer
+//! that owns the parking, and the correct form of that decision is a flag the
+//! consumer publishes before parking and the producer reads after publishing.
+//! That is a store-buffer pattern, and it needs sequential consistency on both
+//! sides: acquire and release alone permit both threads to miss each other.
 //!
 //! # Safety invariant
 //!
@@ -81,12 +78,12 @@
 //! out in order and a lap's worth apart, so no two live accesses name the same
 //! slot.
 //!
-//! Values live in `Option<T>` rather than `MaybeUninit<T>`. That gives up a
-//! discriminant per slot and buys the removal of an entire invariant: there is
-//! no initialization state to track, no `assume_init`, and no hand-written
-//! `Drop` to leak or double-free — dropping the buffer drops whatever is still
-//! in it. The exclusion above is then the only thing this module has to be
-//! right about, and it is the thing loom checks directly.
+//! Values live in `Option<T>` rather than `MaybeUninit<T>`. That costs a
+//! discriminant per slot and removes an entire invariant: no initialization
+//! state to track, no `assume_init`, and no hand-written `Drop` to leak or
+//! double-free, because dropping the buffer drops whatever is still in it. The
+//! exclusion above is then the only thing this module has to be right about,
+//! and it is what loom checks directly.
 #![allow(unsafe_code)]
 
 use crate::cell::UnsafeCell;
@@ -162,8 +159,8 @@ pub fn bounded<T>(capacity: usize) -> (Producer<T>, Consumer<T>) {
     let one_lap = (capacity + 1).next_power_of_two();
     let inner = Arc::new(Inner {
         tail: CachePadded::new(AtomicUsize::new(0)),
-        // Slot `i` starts free for lap zero, which is the stamp `{ lap: 0,
-        // index: i }` — the position that will first claim it.
+        // Slot `i` starts free for lap zero: the stamp `{ lap: 0, index: i }`,
+        // which is the position that will first claim it.
         slots: (0..capacity)
             .map(|index| Slot { stamp: AtomicUsize::new(index), value: UnsafeCell::new(None) })
             .collect(),
@@ -237,9 +234,7 @@ impl<T> Producer<T> {
                         // `write` rather than an assignment: assigning through
                         // a raw pointer drops what was there, which means
                         // reading the slot before writing it. The slot is
-                        // always `None` here — the consumer leaves it that way
-                        // when it takes a value, and it starts that way — so
-                        // there is nothing to drop and nothing to read.
+                        // always `None` here, so there is nothing to drop.
                         unsafe { slot.value.with_mut(|cell| cell.write(Some(value))) };
                         // The publication. Release, so the write above is
                         // visible to whoever acquires this stamp.
@@ -272,8 +267,8 @@ impl<T> Producer<T> {
             // Neither free nor visibly full, which leaves two possibilities: a
             // producer claimed this position and has not published yet, or this
             // thread is looking at a stale tail. Relaxed, because the tail is
-            // only ever a hint about which slot to try — the compare-exchange
-            // is what actually claims one, and the stamp is what synchronizes.
+            // only a hint about which slot to try. The compare-exchange is what
+            // claims one, and the stamp is what synchronizes.
             let current = inner.tail.load(Relaxed);
             if current == tail {
                 // The view is current, so the position really is claimed:
@@ -281,11 +276,11 @@ impl<T> Producer<T> {
                 return Err(value);
             }
             // Someone else advanced the tail while this thread was reading it.
-            // This is the busiest path under load — every producer reads the
-            // tail before acting on it, so every producer lands here whenever
-            // another one gets in first — and it is the one whose backoff
-            // matters most. Without it, push cost degrades linearly in the
-            // number of producers instead of staying flat.
+            // Every producer reads the tail before acting on it, so every
+            // producer lands here whenever another gets in first: this is the
+            // busiest path under load, and the one whose backoff matters most.
+            // Without it, push cost degrades linearly in the number of
+            // producers instead of staying flat.
             tail = current;
             backoff.spin();
         }
@@ -324,7 +319,7 @@ impl<T> Consumer<T> {
         let inner = &*self.inner;
         let index = inner.index(self.head);
         debug_assert!(index < inner.slots.len(), "position outside the ring: {}", self.head);
-        // SAFETY: as in `try_push` — the index is masked and `advance` never
+        // SAFETY: as in `try_push`. The index is masked, and `advance` never
         // produces one at or beyond the capacity.
         let slot = unsafe { inner.slots.get_unchecked(index) };
 
@@ -641,8 +636,8 @@ mod loom_tests {
     /// The lap boundary, which is the ordering that is easiest to get wrong: a
     /// consumer releasing the only slot while a producer is trying to claim it
     /// for the next lap. The producer must either see the release and take the
-    /// slot, or not see it and report full — never write over a value the
-    /// consumer has not taken.
+    /// slot, or not see it and report full. What it must never do is write over
+    /// a value the consumer has not taken.
     #[test]
     fn loom_a_slot_released_by_the_consumer_is_safely_reclaimed() {
         loom::model(|| {

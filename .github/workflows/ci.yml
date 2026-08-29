@@ -81,7 +81,7 @@ jobs:
   # The pure-Rust configuration, with hwloc opted out entirely.
   #
   # No libhwloc is installed and no cache is restored, so this job fails if
-  # anything in the default graph creeps back into the opt-out — which is the
+  # anything in the default graph creeps back into the opt-out, which is the
   # whole point of the feature. It also stands in for musl and air-gapped
   # builds, neither of which can run the default.
   no-topology:
@@ -125,9 +125,9 @@ jobs:
           tool: just,protoc
       - run: just test-system-hwloc
 
-  # A publish cannot be taken back. These two jobs check what breaks one — a
+  # A publish cannot be taken back. These two jobs check what breaks one: a
   # rustdoc build that fails the way docs.rs would, and a manifest crates.io
-  # would reject — on every push rather than at the tag.
+  # would reject. Run on every push rather than at the tag.
   docs:
     runs-on: ubuntu-latest
     steps:

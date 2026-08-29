@@ -2,12 +2,12 @@
 //!
 //! This is a `futures::task::AtomicWaker` in shape and in algorithm, and it
 //! exists for one reason: the futures implementation is built on
-//! `core::sync::atomic`, which loom cannot instrument. A model that used it
-//! would be exploring interleavings of everything *except* the handoff the
-//! model is about, and would report success from a state space that never
-//! contained the interesting orderings. Loom's own `AtomicWaker` is explicitly
-//! a mock — a mutex around an `Option<Waker>` — so verifying against that would
-//! prove a property of the mock rather than of the thing that ships.
+//! `core::sync::atomic`, which loom cannot instrument. A model built on it
+//! would explore interleavings of everything *except* the handoff the model is
+//! about, and would report success from a state space that never contained the
+//! interesting orderings. Loom's own `AtomicWaker` is explicitly a mock, a
+//! mutex around an `Option<Waker>`, so verifying against that would prove a
+//! property of the mock rather than of the thing that ships.
 //!
 //! Owning it makes the cell's atomics loom's atomics under `--cfg loom` and
 //! `std`'s otherwise, so `grommet`'s doorbell models check the same code
@@ -19,7 +19,7 @@
 //! `REGISTERING` is held by a thread storing a waker; `WAKING` by a thread
 //! taking one. Whoever moves the state out of `WAITING` has exclusive access to
 //! the cell until it moves it back, and anyone who finds a bit already set
-//! declines rather than waits — there is no blocking anywhere in here.
+//! declines rather than waits. Nothing in here blocks.
 //!
 //! The subtle case is a wake arriving while a registration holds the lock. The
 //! waker is mid-store, so the waking thread cannot take it; instead it leaves
@@ -43,9 +43,9 @@
 //! Grommet has exactly one thread that registers on a given cell: the shard
 //! that owns it, from the top of its own reactor turn. Concurrent registration
 //! is therefore a bug, and `register` `debug_assert!`s against it. It stays
-//! *memory-safe* if it happens anyway — the loser simply declines the lock and
-//! its waker is dropped, exactly as in the futures implementation — because
-//! soundness should not rest on a discipline that is merely intended.
+//! *memory-safe* if it happens anyway, with the loser declining the lock and
+//! dropping its waker, exactly as in the futures implementation. Soundness
+//! should not rest on a discipline that is merely intended.
 #![allow(unsafe_code)]
 
 use crate::cell::UnsafeCell;
@@ -97,9 +97,9 @@ impl WakerSlot {
                 return;
             }
             Err(_actual) => {
-                // Only reachable if a second thread is registering. Grommet has
-                // one registrar per slot, so this is a bug rather than a race
-                // to resolve — but it must stay sound, so the loser declines
+                // Only reachable if a second thread is registering. Grommet
+                // has one registrar per slot, so this is a bug rather than a
+                // race to resolve, but it must stay sound: the loser declines
                 // the lock and delivers its wake directly rather than touching
                 // the cell.
                 debug_assert!(
@@ -137,9 +137,9 @@ impl WakerSlot {
                 // A wake landed while the cell was held. It could not take the
                 // waker, so it left `WAKING` set for us to honour.
                 debug_assert_eq!(actual, REGISTERING | WAKING);
-                // SAFETY: both bits are held by this thread — `REGISTERING`
-                // from the exchange above, and `WAKING` set by a thread that
-                // has already returned without touching the cell.
+                // SAFETY: both bits are held by this thread. `REGISTERING`
+                // came from the exchange above, and `WAKING` was set by a
+                // thread that has already returned without touching the cell.
                 let pending = unsafe { self.waker.with_mut(|slot| (*slot).take()) };
                 self.state.swap(WAITING, AcqRel);
                 drop(previous);
@@ -383,10 +383,10 @@ mod loom_tests {
     /// Note what this does *not* isolate. When a wake lands mid-registration,
     /// the registrar's failed release exchange acquires the notifier's `WAKING`
     /// write, which orders the notifier's earlier publish before the check
-    /// below — so the check finds the work and the model passes even if the
-    /// deferred wake were dropped entirely. That path is only observable when a
-    /// second registration replaces the waker the notifier was reaching for,
-    /// which is what the third model here drives.
+    /// below. The check therefore finds the work, and the model passes even if
+    /// the deferred wake were dropped entirely. That path is only observable
+    /// when a second registration replaces the waker the notifier was reaching
+    /// for, which is what the third model here drives.
     #[test]
     fn loom_a_wake_racing_a_registration_is_deferred_not_lost() {
         loom::model(|| {
