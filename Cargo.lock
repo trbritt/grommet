@@ -942,7 +942,8 @@ version = "0.1.4"
 dependencies = [
  "ahash",
  "crossbeam-utils",
- "futures",
+ "futures-channel",
+ "futures-util",
  "grommet-core",
  "grommet-topology",
  "hdrhistogram",
@@ -970,6 +971,7 @@ version = "0.1.4"
 name = "grommet-offload"
 version = "0.1.4"
 dependencies = [
+ "futures-channel",
  "grommet",
  "rayon",
  "tokio",

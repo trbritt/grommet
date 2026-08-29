@@ -12,6 +12,7 @@
 use crate::clock::Clock;
 use crate::router::{Router, SubmitError};
 use crate::work::Work;
+use futures_channel::oneshot;
 use grommet_core::ClassId;
 use std::error::Error;
 use std::fmt;
@@ -19,7 +20,6 @@ use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::Duration;
-use tokio::sync::oneshot;
 
 /// The caller stopped waiting, or the processor finished without answering.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -88,7 +88,7 @@ impl<W: Work, R> Call<W, R> {
 
     /// Whether the caller has stopped waiting.
     pub fn is_cancelled(&self) -> bool {
-        self.respond.is_closed()
+        self.respond.is_canceled()
     }
 }
 
@@ -148,7 +148,7 @@ impl<R> Responder<R> {
     /// Whether the caller has stopped waiting. Worth checking before starting
     /// expensive work, since nobody will read the result.
     pub fn is_cancelled(&self) -> bool {
-        self.0.is_closed()
+        self.0.is_canceled()
     }
 }
 

@@ -22,7 +22,13 @@ unexpected_cfgs = { level = "deny", check-cfg = ["cfg(coverage)", "cfg(loom)"] }
 # threads and read by the owner, so they must not share a cache line.
 ahash = "0.8"
 crossbeam-utils = "0.8"
-futures = "0.3"
+# Only `catch_unwind` and `Either` are used, so the facade is not. Naming the
+# sub-crate directly drops the executor, the IO and sink traits, and a
+# proc-macro from the graph: eight crates become four.
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+# The reply channel behind `Call`/`Answer`. Runtime-free, so a `Call` does not
+# tie the caller to whichever host the driver seam selected.
+futures-channel = { version = "0.3", default-features = false, features = ["std"] }
 # Latency histograms. `default-features = false` drops serialization and the
 # cross-thread recorder, neither of which this uses: the shard records into a
 # histogram it owns and publishes it once per tick. Constructed with explicit
@@ -39,7 +45,7 @@ parking_lot = "0.12"
 # quanta reads the CPU's counter instead where the platform has a usable one,
 # and falls back to the OS clock where it does not.
 quanta = "0.12"
-tokio = { version = "1", features = ["rt", "sync", "time", "macros"] }
+tokio = { version = "1", features = ["rt", "time"] }
 grommet-core = { workspace = true }
 # `default-features = false` so both switches below, whether to use hwloc at
 # all and vendored versus system, are re-exported here rather than fixed. A

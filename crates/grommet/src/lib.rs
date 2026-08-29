@@ -114,6 +114,10 @@ pub mod processor;
 pub mod respond;
 pub mod router;
 pub mod scheduler;
+// Not part of the documented surface: a workspace-internal primitive that
+// happens to need a crate boundary, since the offload pool is its only user.
+#[doc(hidden)]
+pub mod semaphore;
 pub mod shard;
 pub mod topology;
 pub(crate) mod waiters;

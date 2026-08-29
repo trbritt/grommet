@@ -70,7 +70,7 @@ impl OffloadStats {
 #[derive(Clone)]
 pub struct RayonOffload {
     pool: Arc<rayon::ThreadPool>,
-    permits: Arc<tokio::sync::Semaphore>,
+    permits: Arc<grommet::semaphore::Semaphore>,
     stats: Arc<OffloadStats>,
     workers: usize,
     node: Option<usize>,
@@ -146,7 +146,7 @@ impl RayonOffload {
 
         Self {
             pool: Arc::new(pool),
-            permits: Arc::new(tokio::sync::Semaphore::new(workers * queue_depth)),
+            permits: Arc::new(grommet::semaphore::Semaphore::new(workers * queue_depth)),
             stats,
             workers,
             node,
@@ -218,11 +218,10 @@ impl Offload for RayonOffload {
         T: Send + 'static,
     {
         let waiting = Instant::now();
-        let _permit =
-            self.permits.clone().acquire_owned().await.map_err(|_| OffloadError::Closed)?;
+        let _permit = self.permits.acquire().await.map_err(|_| OffloadError::Closed)?;
         self.stats.permit_wait_nanos.fetch_add(waiting.elapsed().as_nanos() as u64, Relaxed);
 
-        let (respond, receive) = tokio::sync::oneshot::channel();
+        let (respond, receive) = futures_channel::oneshot::channel();
         let started = Instant::now();
         self.pool.spawn_fifo(move || {
             let _ = respond.send(task());
