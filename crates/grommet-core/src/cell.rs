@@ -7,10 +7,9 @@
 //! code that uses a cell is written once and is the code loom checks, rather
 //! than a `cfg`-selected variant of it.
 //!
-//! This is deliberately the smallest surface that serves its users: one
-//! constructor and one accessor. Anything that wants a shared read would need
-//! `with`, and nothing here does — every access below is a move in or a move
-//! out, under a lock the caller holds.
+//! Deliberately the smallest surface that serves its users: one constructor
+//! and one accessor. A shared read would need `with`, and nothing here does.
+//! Every access is a move in or a move out, under a lock the caller holds.
 #![allow(unsafe_code)]
 
 /// A cell whose accesses loom can see.

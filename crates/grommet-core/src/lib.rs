@@ -279,7 +279,7 @@ pub struct Scheduler<K, P, S, const CLASSES: usize = 2> {
     idle_head: Option<K>,
     idle_tail: Option<K>,
     idle: usize,
-    expired: VecDeque<(K, P)>,
+    expired: VecDeque<(K, ClassId, P)>,
     inflight: [usize; CLASSES],
     pending: usize,
     evicting: usize,
@@ -388,7 +388,7 @@ where
                     let item =
                         self.slab.pop_front(&mut slot.queue).expect("front was just observed");
                     self.pending -= 1;
-                    self.expired.push_back((key, item.payload));
+                    self.expired.push_back((key, item.class, item.payload));
                     continue;
                 }
                 taken = self.slab.pop_front(&mut slot.queue);
@@ -415,8 +415,14 @@ where
     }
 
     /// Take an item that was discarded at dispatch because its deadline had
-    /// passed. The caller owns telling whoever submitted it.
-    pub fn pop_expired(&mut self) -> Option<(K, P)> {
+    /// passed, with the class it was admitted under. The caller owns telling
+    /// whoever submitted it.
+    ///
+    /// The class comes from the item rather than being recomputed from the
+    /// payload, for the reason the module header gives: what this scheduler
+    /// knows about a payload is stamped once at admission, and asking again
+    /// would let an inconsistent answer desynchronize the accounting.
+    pub fn pop_expired(&mut self) -> Option<(K, ClassId, P)> {
         self.expired.pop_front()
     }
 
@@ -834,9 +840,9 @@ mod tests {
         let now = Duration::from_secs(2);
         let dispatch = book.next(IO, now).expect("the item without a deadline survives");
         assert_eq!(dispatch.key, 6);
-        assert_eq!(book.pop_expired().map(|(key, _)| key), Some(4));
-        assert_eq!(book.pop_expired().map(|(key, _)| key), Some(5));
-        assert_eq!(book.pop_expired().map(|(key, _)| key), None);
+        assert_eq!(book.pop_expired().map(|(key, ..)| key), Some(4));
+        assert_eq!(book.pop_expired().map(|(key, ..)| key), Some(5));
+        assert_eq!(book.pop_expired().map(|(key, ..)| key), None);
         assert_eq!(book.pending(), 1, "expired items leave the pending count");
         book.complete(finish(dispatch), now);
         assert_eq!(book.check_invariants(), Ok(()));
@@ -851,7 +857,7 @@ mod tests {
 
         let now = Duration::from_secs(2);
         assert!(book.next(IO, now).is_none(), "the only IO item expired");
-        assert_eq!(book.pop_expired().map(|(key, _)| key), Some(7));
+        assert_eq!(book.pop_expired().map(|(key, ..)| key), Some(7));
         assert_eq!(book.next(CPU, now).unwrap().key, 7, "the key moved to the compute ring");
         assert_eq!(book.check_invariants(), Ok(()));
     }

@@ -4,7 +4,7 @@ use accounts::domain::{COMPUTE, IO};
 use accounts::frontdoor::Frontdoor;
 use accounts::processor::AccountProcessor;
 use accounts::prod::{PgStore, RedisCache};
-use grommet::metrics::ShardStats;
+use grommet::metrics::{ShardStats, histogram};
 use grommet::topology::{Observation, Workload, detect};
 use grommet::{PinPolicy, Scheduler, ShardConfig};
 use grommet_offload::{OffloadPools, OffloadStats, RayonOffload};
@@ -64,15 +64,48 @@ fn start_exporter<const CLASSES: usize>(
                 total += rate;
                 println!(
                     "shard {index}: {rate:.0} req/s, scheduler {:.1}%, \
-                     pending {}, resident {}, in-doubt {}, coalesced {}, expired {}",
+                     pending {}, resident {}, in-doubt {}, coalesced {}, expired {}, \
+                     oldest in flight {:.1}ms",
                     elapsed as f64 / (seconds * 1e9) * 100.0,
                     shard.pending.load(Relaxed),
                     shard.resident.load(Relaxed),
                     shard.in_doubt.load(Relaxed),
                     shard.coalesced.load(Relaxed),
                     shard.expired.load(Relaxed),
+                    shard.inflight_age_max_nanos.load(Relaxed) as f64 / 1e6,
                 );
             }
+
+            // Merged, then asked once. A quantile per shard averaged together
+            // would report a number no request experienced, and would hide the
+            // one slow shard that is usually the whole problem.
+            let mut queue_wait = histogram();
+            let mut process = histogram();
+            let mut admitted = [0u64; CLASSES];
+            let mut finished = [0u64; CLASSES];
+            for shard in &shards {
+                shard.merge_queue_wait_into(&mut queue_wait);
+                shard.merge_process_into(&mut process);
+                for class in 0..CLASSES {
+                    admitted[class] += shard.started_by_class[class].load(Relaxed);
+                    finished[class] += shard.completed_by_class[class].load(Relaxed);
+                }
+            }
+            println!(
+                "queue wait  p50 {:>9} p99 {:>9} p999 {:>9}  (ns, {} samples)",
+                queue_wait.value_at_quantile(0.5),
+                queue_wait.value_at_quantile(0.99),
+                queue_wait.value_at_quantile(0.999),
+                queue_wait.len(),
+            );
+            println!(
+                "processing  p50 {:>9} p99 {:>9} p999 {:>9}  (ns, {} samples)",
+                process.value_at_quantile(0.5),
+                process.value_at_quantile(0.99),
+                process.value_at_quantile(0.999),
+                process.len(),
+            );
+            println!("by class    admitted {admitted:?}, finished {finished:?}");
 
             let busy: Duration = offload.iter().map(|pool| pool.busy()).sum();
             let waited: Duration = offload.iter().map(|pool| pool.permit_wait()).sum();

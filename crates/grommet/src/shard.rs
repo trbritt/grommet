@@ -114,6 +114,9 @@ impl<const CLASSES: usize> ShardConfig<CLASSES> {
 enum Outcome<K, S, I> {
     /// A dispatched item finished, however it finished.
     Ran {
+        /// Identifies this dispatch in the shard's in-flight ledger, so its
+        /// duration and its release are one lookup rather than a search.
+        dispatch: u64,
         completion: Completion<K, S>,
         /// Returned so the coalescing index can release it.
         request_id: Option<I>,
@@ -136,6 +139,7 @@ type OutcomeOf<P> =
 /// variant.
 async fn run_one<P: Processor>(
     processor: P,
+    sequence: u64,
     dispatch: Dispatch<KeyOf<P>, Stamped<P::Work>, P::State>,
 ) -> OutcomeOf<P> {
     let Dispatch { key, class, state, payload } = dispatch;
@@ -157,7 +161,13 @@ async fn run_one<P: Processor>(
         // A panic tells us nothing about what the work managed to do first.
         Err(_) => (Disposition::Drop, true, Some(Fallout::InDoubt)),
     };
-    Outcome::Ran { completion: Completion { key, class, state }, request_id, panicked, fallout }
+    Outcome::Ran {
+        dispatch: sequence,
+        completion: Completion { key, class, state },
+        request_id,
+        panicked,
+        fallout,
+    }
 }
 
 /// Flush one key's state. The key stays quiesced until this resolves.
@@ -170,7 +180,7 @@ fn admit_one<P: Processor, const CLASSES: usize>(
     book: &mut Book<KeyOf<P>, P::Work, P::State, CLASSES>,
     live: &mut Live<KeyOf<P>, <P::Work as Work>::Id>,
     processor: &P,
-    hot: &ShardHot,
+    hot: &ShardHot<CLASSES>,
     envelope: Envelope<P::Work>,
     coalesce: bool,
 ) {
@@ -191,7 +201,7 @@ fn admit_one<P: Processor, const CLASSES: usize>(
         _ => None,
     };
 
-    hot.bump(&hot.started);
+    hot.bump(&hot.started_by_class[class as usize]);
     book.admit(Admit {
         key,
         class,
@@ -208,7 +218,7 @@ fn admit_one<P: Processor, const CLASSES: usize>(
 struct Turn<'a, P: Processor, C: Clock, const CLASSES: usize> {
     processor: &'a P,
     clock: &'a C,
-    hot: &'a ShardHot,
+    hot: &'a ShardHot<CLASSES>,
     stats: &'a ShardStats<CLASSES>,
     cfg: &'a ShardConfig<CLASSES>,
 }
@@ -230,21 +240,80 @@ struct Admitted {
 fn dispatch_ready<P, F, const CLASSES: usize>(
     book: &mut Book<KeyOf<P>, P::Work, P::State, CLASSES>,
     outstanding: &mut Outstanding<F>,
-    hot: &ShardHot,
+    hot: &ShardHot<CLASSES>,
+    ages: &mut InFlightAges,
     now: Duration,
-    mut start: impl FnMut(Dispatch<KeyOf<P>, Stamped<P::Work>, P::State>) -> F,
+    mut start: impl FnMut(u64, Dispatch<KeyOf<P>, Stamped<P::Work>, P::State>) -> F,
 ) where
     P: Processor,
     F: Future<Output = OutcomeOf<P>>,
 {
     for class in 0..CLASSES {
         while let Some(dispatch) = book.next(class as ClassId, now) {
-            hot.add(
-                &hot.queue_wait_nanos,
-                now.saturating_sub(dispatch.payload.enqueued).as_nanos() as u64,
-            );
-            outstanding.push(start(dispatch));
+            let waited = now.saturating_sub(dispatch.payload.enqueued).as_nanos() as u64;
+            hot.add(&hot.queue_wait_nanos, waited);
+            hot.record_queue_wait(waited);
+            outstanding.push(start(ages.begin(now), dispatch));
         }
+    }
+}
+
+/// When each in-flight dispatch started, so the shard can say how long the
+/// oldest has been running.
+///
+/// Every other counter here describes work that finished, which is exactly the
+/// blind spot a wedged future hides in. This is a fixed array indexed by a
+/// dispatch sequence number, and the indexing is sound for one reason: at most
+/// `slots` dispatches can be in flight at once, because that is the scheduler's
+/// own budget, so by the time sequence `n` reuses a slot the occupant `n -
+/// slots` has necessarily completed.
+///
+/// Reading it is a scan, which is why it happens once per tick rather than once
+/// per item. Recording is two stores on dispatch and one on completion.
+struct InFlightAges {
+    started_at: Box<[Duration]>,
+    live: Box<[bool]>,
+    next: u64,
+}
+
+impl InFlightAges {
+    fn new(slots: usize) -> Self {
+        let slots = slots.max(1);
+        Self {
+            started_at: vec![Duration::ZERO; slots].into_boxed_slice(),
+            live: vec![false; slots].into_boxed_slice(),
+            next: 0,
+        }
+    }
+
+    /// Note a dispatch starting, returning the sequence number that identifies
+    /// it until it completes.
+    #[inline]
+    fn begin(&mut self, now: Duration) -> u64 {
+        let sequence = self.next;
+        self.next = sequence.wrapping_add(1);
+        let slot = (sequence % self.started_at.len() as u64) as usize;
+        self.started_at[slot] = now;
+        self.live[slot] = true;
+        sequence
+    }
+
+    /// Note a dispatch finishing, returning how long it ran.
+    #[inline]
+    fn finish(&mut self, sequence: u64, now: Duration) -> Duration {
+        let slot = (sequence % self.started_at.len() as u64) as usize;
+        self.live[slot] = false;
+        now.saturating_sub(self.started_at[slot])
+    }
+
+    /// How long the oldest still-running dispatch has been running.
+    fn oldest(&self, now: Duration) -> Duration {
+        self.started_at
+            .iter()
+            .zip(self.live.iter())
+            .filter_map(|(started, live)| live.then_some(*started))
+            .min()
+            .map_or(Duration::ZERO, |started| now.saturating_sub(started))
     }
 }
 
@@ -254,10 +323,10 @@ fn shed_expired<P: Processor, const CLASSES: usize>(
     book: &mut Book<KeyOf<P>, P::Work, P::State, CLASSES>,
     live: &mut Live<KeyOf<P>, <P::Work as Work>::Id>,
     processor: &P,
-    hot: &ShardHot,
+    hot: &ShardHot<CLASSES>,
 ) {
-    while let Some((key, stamped)) = book.pop_expired() {
-        hot.bump(&hot.expired);
+    while let Some((key, class, stamped)) = book.pop_expired() {
+        hot.bump(&hot.expired_by_class[class as usize]);
         if let Some(id) = stamped.request_id {
             live.remove(&(key, id));
         }
@@ -268,10 +337,10 @@ fn shed_expired<P: Processor, const CLASSES: usize>(
 /// Move as many staged eviction candidates into flight as the flush budget
 /// allows, oldest first. The rest wait in `staged`; they are already quiesced,
 /// so nothing dispatches for them meanwhile.
-fn begin_flushes<P, F>(
+fn begin_flushes<P, F, const CLASSES: usize>(
     staged: &mut Vec<(KeyOf<P>, P::State)>,
     outstanding: &mut Outstanding<F>,
-    hot: &ShardHot,
+    hot: &ShardHot<CLASSES>,
     flushes: &mut usize,
     budget: usize,
     mut start: impl FnMut(KeyOf<P>, P::State) -> F,
@@ -343,27 +412,30 @@ fn drain_inbox<P: Processor, C: Clock, const CLASSES: usize>(
 /// scheduler needs its timestamps monotonic rather than individually precise,
 /// and a batch spans microseconds against an eviction window of seconds.
 /// Returns the harvest report and whether a caught panic demands an abort.
-fn harvest_completions<P, F, const CLASSES: usize>(
+fn harvest_completions<P, C, F, const CLASSES: usize>(
     outstanding: &mut Outstanding<F>,
     book: &mut Book<KeyOf<P>, P::Work, P::State, CLASSES>,
     live: &mut Live<KeyOf<P>, <P::Work as Work>::Id>,
-    hot: &ShardHot,
+    turn: &Turn<'_, P, C, CLASSES>,
+    ages: &mut InFlightAges,
     flushes: &mut usize,
-    cfg: &ShardConfig<CLASSES>,
     at: Duration,
 ) -> (Harvest, bool)
 where
     P: Processor,
+    C: Clock,
     F: Future<Output = OutcomeOf<P>>,
 {
+    let Turn { hot, cfg, .. } = turn;
     let mut abort = false;
     // Clamped, not trusted: the set takes a zero cap literally and polls
     // nothing, and `ShardConfig` has public fields a caller can set by hand. A
     // shard that harvested nothing would never complete anything, so zero is
     // read as one rather than as a request to stop.
     let report = outstanding.harvest(cfg.complete_batch.max(1), |outcome| match outcome {
-        Outcome::Ran { completion, request_id, panicked, fallout } => {
-            hot.bump(&hot.completed);
+        Outcome::Ran { dispatch, completion, request_id, panicked, fallout } => {
+            hot.bump(&hot.completed_by_class[completion.class as usize]);
+            hot.record_process(ages.finish(dispatch, at).as_nanos() as u64);
             if let Some(fallout) = fallout {
                 hot.bump(&hot.failed);
                 if fallout.is_in_doubt() {
@@ -394,6 +466,7 @@ fn service_timers<P: Processor, C: Clock, const CLASSES: usize>(
     book: &mut Book<KeyOf<P>, P::Work, P::State, CLASSES>,
     staged: &mut Vec<(KeyOf<P>, P::State)>,
     turn: &Turn<'_, P, C, CLASSES>,
+    ages: &InFlightAges,
     now: Duration,
 ) -> bool {
     let Turn { stats, hot, cfg, .. } = turn;
@@ -404,6 +477,11 @@ fn service_timers<P: Processor, C: Clock, const CLASSES: usize>(
     for timer in due.drain(..) {
         match timer {
             Timer::Tick => {
+                // Refreshed here rather than tracked per dispatch: the scan is
+                // over the dispatch budget and happens once a tick, where
+                // maintaining a running minimum would cost something on every
+                // completion.
+                hot.inflight_age_max_nanos.set(ages.oldest(now).as_nanos() as u64);
                 stats.publish(hot, &book.snapshot());
                 // Only sweep once the last batch has been fully handed over,
                 // so candidates never pile up here: a key waits on the
@@ -434,7 +512,7 @@ pub async fn run<P, C, const CLASSES: usize>(
     P: Processor,
     C: Clock,
 {
-    let hot = ShardHot::default();
+    let hot = ShardHot::<CLASSES>::default();
     let mut book: Book<KeyOf<P>, P::Work, P::State, CLASSES> = Scheduler::new(cfg.scheduler);
     let mut live: Live<KeyOf<P>, <P::Work as Work>::Id> = Live::default();
 
@@ -448,6 +526,11 @@ pub async fn run<P, C, const CLASSES: usize>(
     // `async fn`'s future has no nameable type. That is what keeps the set a
     // flat slab with no dynamic dispatch anywhere.
     let mut outstanding = Outstanding::with_capacity(capacity);
+
+    // Sized by the dispatch budget rather than by `capacity`: eviction flushes
+    // share the outstanding set but are not dispatches, and it is the dispatch
+    // budget that bounds how many sequence numbers can be live at once.
+    let mut ages = InFlightAges::new(cfg.scheduler.max_inflight.iter().sum::<usize>());
 
     // Where a sweep hands its candidates back, reused across sweeps so the
     // steady state allocates nothing. It doubles as the queue for anything the
@@ -496,11 +579,16 @@ pub async fn run<P, C, const CLASSES: usize>(
         now = clock.now();
 
         loop {
-            dispatch_ready::<P, _, CLASSES>(&mut book, &mut outstanding, &hot, now, |dispatch| {
-                Either::Left(run_one(processor.clone(), dispatch))
-            });
+            dispatch_ready::<P, _, CLASSES>(
+                &mut book,
+                &mut outstanding,
+                &hot,
+                &mut ages,
+                now,
+                |sequence, dispatch| Either::Left(run_one(processor.clone(), sequence, dispatch)),
+            );
             shed_expired(&mut book, &mut live, &processor, &hot);
-            begin_flushes::<P, _>(
+            begin_flushes::<P, _, CLASSES>(
                 &mut staged,
                 &mut outstanding,
                 &hot,
@@ -544,16 +632,17 @@ pub async fn run<P, C, const CLASSES: usize>(
             };
 
             let at = clock.now();
-            let (harvest, abort) = harvest_completions::<P, _, CLASSES>(
+            let (harvest, abort) = harvest_completions::<P, _, _, CLASSES>(
                 &mut outstanding,
                 &mut book,
                 &mut live,
-                &hot,
+                &turn,
+                &mut ages,
                 &mut flushes,
-                &cfg,
                 at,
             );
             if abort {
+                hot.inflight_age_max_nanos.set(ages.oldest(now).as_nanos() as u64);
                 stats.publish(&hot, &book.snapshot());
                 std::process::abort();
             }
@@ -568,6 +657,7 @@ pub async fn run<P, C, const CLASSES: usize>(
                 &mut book,
                 &mut staged,
                 &turn,
+                &ages,
                 now,
             );
 
@@ -590,6 +680,9 @@ pub async fn run<P, C, const CLASSES: usize>(
     })
     .await;
 
+    // Nothing is left in flight by here, so the gauge reports zero rather than
+    // whatever the last dispatch happened to leave behind.
+    hot.inflight_age_max_nanos.set(ages.oldest(now).as_nanos() as u64);
     stats.publish(&hot, &book.snapshot());
 }
 
@@ -774,10 +867,10 @@ mod tests {
 
             // On its own task, and that is load-bearing. `join!` polls every
             // unfinished branch each time it is polled, so a submitter driven
-            // from this future would be re-polled whenever the shard was woken
+            // from this future would be re-polled whenever the shard was woken,
             // and would find room whether or not anyone had told it about the
-            // room — which is precisely the bug being tested for. A spawned
-            // task is polled only when something actually wakes it.
+            // room. That is precisely the bug being tested for. A spawned task
+            // is polled only when something actually wakes it.
             let waiting = {
                 let router = Arc::clone(&router);
                 tokio::spawn(async move { router.submit(Item::new(3)).await })

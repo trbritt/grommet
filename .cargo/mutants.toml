@@ -10,8 +10,8 @@ exclude_globs = [
     "crates/grommet-offload/**",
     "crates/grommet-testkit/**",
     # Placement is decided from the machine hwloc reports. Most of the branches
-    # here exist for hardware no single runner has at once — hybrid P/E cores,
-    # multiple sockets, a cgroup bandwidth limit — so a surviving mutant usually
+    # here exist for hardware no single runner has at once: hybrid P/E cores,
+    # multiple sockets, a cgroup bandwidth limit. So a surviving mutant usually
     # means the shape was absent, not that the assertion was weak. Its wrapper,
     # `grommet/src/topology.rs`, is excluded for the same reason.
     "crates/grommet-topology/**",
@@ -36,7 +36,7 @@ exclude_globs = [
 # back in scope by hand rather than silently leaving it uncovered.
 exclude_re = [
     "check_invariants",
-    # `Processor`'s observation hooks default to doing nothing — the bodies are
+    # `Processor`'s observation hooks default to doing nothing. The bodies are
     # `let _ = (..);` to name the arguments. Replacing a no-op with `()` is the
     # same function, so these can only ever be reported as missed. The
     # implementations that override them are scored normally.
@@ -47,7 +47,7 @@ exclude_re = [
     # `heavy_revalue` stands in for CPU-bound work: an arbitrary deterministic
     # mix chosen to take a while, not to compute anything meaningful. Its
     # operators have no specification to violate, so pinning them would take a
-    # test asserting a magic constant — which would fail on any retuning of the
+    # test asserting a magic constant, which would fail on any retuning of the
     # workload while catching nothing. What callers rely on is that it is
     # deterministic and expensive, and that is what its own tests check.
     "heavy_revalue",

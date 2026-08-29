@@ -2,9 +2,9 @@
 //!
 //! Four operations, and underneath them a bounded ring the shard owns, a
 //! doorbell that wakes it, and the queue of senders parked on a full ring. The
-//! surface is deliberately narrow — it is exactly what the router and the shard
-//! do and nothing else — because nothing downstream should be able to name the
-//! substrate, and because the substrate is the part still moving.
+//! surface is exactly what the router and the shard do and nothing else,
+//! because nothing downstream should be able to name the substrate, and the
+//! substrate is the part still moving.
 //!
 //! Depth composes: a shard will hold up to `capacity` items here *plus*
 //! whatever its scheduler has already admitted, so the number of items in
@@ -26,13 +26,13 @@
 //! | shard | registers on the doorbell | ring for an item | a sender that pushed |
 //! | sender | parks on the wait list | ring for room | the shard, having popped |
 //!
-//! Getting that order right on each side is necessary but not sufficient,
-//! because the two threads are storing one location and loading another, in
-//! opposite orders. That is the store-buffer shape, and acquire and release do
-//! not forbid both threads from missing each other — only a sequentially
-//! consistent fence on each side does. So each side fences between publishing
-//! and looking, and those fences are what make "the shard is asleep" and "the
-//! ring is empty" impossible to observe together.
+//! Getting that order right on each side is necessary but not sufficient. The
+//! two threads store one location and load another in opposite orders, which is
+//! the store-buffer shape, and acquire and release do not forbid both of them
+//! missing each other. Only a sequentially consistent fence on each side does.
+//! So each side fences between publishing and looking, and those fences are
+//! what make "the shard is asleep" and "the ring is empty" impossible to
+//! observe together.
 //!
 //! # What the fences cost, and where they are not paid
 //!
@@ -149,7 +149,7 @@ impl<W> Mailbox<W> {
     /// it is pushed and the result returned without an intervening await, so
     /// there is no state in which a dropped future has half-submitted
     /// something. Dropping it before it completes therefore drops the item
-    /// without sending it, which is what makes it safe as a `select!` branch —
+    /// without sending it, which is what makes it safe as a `select!` branch:
     /// a branch that loses its race did not submit.
     ///
     /// Dropping also gives up the caller's place in the queue, and if a slot
@@ -402,9 +402,9 @@ impl<W> Inbox<W> {
     /// it on the paths that find the mailbox empty, but those are not the only
     /// ways a drain ends: a shard also stops when its admission budget runs out
     /// or its scheduler saturates, and under load those are the usual ones. A
-    /// drain that ended without releasing has freed slots that no waiting
-    /// sender has been told about, which is how a submitter starves in front of
-    /// a mailbox with room in it.
+    /// drain that ended without releasing has freed slots no waiting sender has
+    /// been told about, which is how a submitter starves in front of a mailbox
+    /// with room in it.
     ///
     /// [`poll_recv`]: Inbox::poll_recv
     pub(crate) fn release_capacity(&mut self) {
@@ -701,11 +701,11 @@ mod backpressure_tests {
 /// Exhaustive interleavings of the two directions a wake travels.
 ///
 /// The unit tests above can show that a sender is admitted and that a shard
-/// receives; they cannot show that no schedule exists in which one of them
+/// receives. They cannot show that no schedule exists in which one of them
 /// sleeps while the thing it was waiting for is already there. That is what
 /// these are for, and it is why the fences in this module are sequentially
-/// consistent rather than merely release and acquire — under acquire and
-/// release both of these models fail.
+/// consistent rather than merely release and acquire: under acquire and release
+/// both of these models fail.
 #[cfg(all(test, loom))]
 mod loom_tests {
     use super::*;
@@ -769,11 +769,11 @@ mod loom_tests {
     /// full and parks must be woken by the shard that drained it.
     ///
     /// Both halves of the arrangement here are load-bearing. The sender parks
-    /// on this thread so that its registration is still live when the assertion
-    /// runs — a sender that has gone away is owed nothing. And the drainer
-    /// hands the inbox back rather than dropping it, because dropping it closes
-    /// the mailbox and wakes every parked sender, which would satisfy the
-    /// assertion for the wrong reason.
+    /// on this thread so its registration is still live when the assertion
+    /// runs, because a sender that has gone away is owed nothing. And the
+    /// drainer hands the inbox back rather than dropping it, because dropping
+    /// it closes the mailbox and wakes every parked sender, which would satisfy
+    /// the assertion for the wrong reason.
     #[test]
     fn loom_a_sender_never_parks_on_room_already_freed() {
         loom::model(|| {
@@ -813,10 +813,10 @@ mod starvation_tests {
     }
 
     /// A shard stops draining when its admission budget runs out or its
-    /// scheduler saturates, both of which leave items still queued — so a drain
-    /// that only ever sees `Ready` is the common case under load, not an edge
-    /// one. The slots it freed have to reach the senders waiting for them
-    /// anyway.
+    /// scheduler saturates, and both leave items still queued. A drain that
+    /// only ever sees `Ready` is therefore the common case under load, not an
+    /// edge one, and the slots it freed still have to reach the senders waiting
+    /// for them.
     #[tokio::test]
     async fn a_drain_that_stops_before_the_mailbox_empties_still_admits_a_waiting_sender() {
         let (mailbox, mut inbox) = channel(2);

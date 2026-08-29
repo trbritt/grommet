@@ -1,44 +1,41 @@
 //! One wake, delivered once, never after the receiver is gone.
 //!
-//! Every component a shard parks on faces the same three problems, and they
-//! are not the interesting part of any of them. Something on another thread
-//! makes work visible and has to schedule the owner. The owner has to decide it
-//! has nothing to do and go to sleep, without racing the notification that
-//! would have told it otherwise. And the whole arrangement has to survive the
-//! owner going away, because a stale notifier outliving its receiver is how a
-//! wake lands on a task that no longer exists.
+//! Every component a shard parks on faces the same three problems, and none of
+//! them is the interesting part of that component. Another thread makes work
+//! visible and has to schedule the owner. The owner has to decide it has
+//! nothing to do and sleep, without racing the notification that would have
+//! told it otherwise. And the arrangement has to survive the owner going away,
+//! because a stale notifier outliving its receiver is how a wake lands on a
+//! task that no longer exists.
 //!
-//! A `Doorbell` is that protocol and nothing else. It holds no readiness state
-//! of its own: what counts as "there is work" belongs to whoever rings, because
-//! only they can coalesce it cheaply. [`Outstanding`] rings on a ready bit's
-//! `0 -> 1` transition; the mailbox rings on a push that found the ring empty.
-//! Both want the same answer to *how the owner is woken*, and neither wants to
-//! re-derive it.
+//! A `Doorbell` is that protocol and nothing else. It holds no readiness state:
+//! what counts as "there is work" belongs to whoever rings, because only they
+//! can coalesce it cheaply. [`Outstanding`] rings on a ready bit's `0 -> 1`
+//! transition, the mailbox on a push into an empty ring. Both want the same
+//! answer to *how the owner is woken*.
 //!
 //! # Registering before the check
 //!
 //! The owner must [`register`] before testing the predicate it would park on.
-//! Registering after the test leaves a window where a notification arrives
-//! between the two and finds no waker, and the owner then sleeps on work that
-//! is already visible. Registering first closes it: a notification in that same
-//! window either sees the registered waker and schedules the owner, or is
-//! ordered before the test and the test finds the work. The shard's reactor
-//! does exactly this at the top of every turn, before anything it will later
-//! rely on when deciding to wait.
+//! The other order leaves a window where a notification arrives between the two
+//! and finds no waker, and the owner sleeps on work already visible.
+//! Registering first closes it: a notification in that window either sees the
+//! waker and schedules the owner, or is ordered before the test and the test
+//! finds the work. The shard's reactor does this at the top of every turn.
 //!
 //! # Closing
 //!
-//! [`close`] is one-way. After it returns, no [`ring`] delivers a wake and the
+//! [`close`] is one-way. Afterwards no [`ring`] delivers a wake and the
 //! registered waker has been dropped, which is what lets a receiver be
 //! destroyed while notifiers it handed out are still alive and still firing.
-//! Those late rings are not errors; they are the ordinary consequence of a
-//! waker outliving the thing it points at, and they are discarded.
+//! Those late rings are not errors but the ordinary consequence of a waker
+//! outliving what it points at, and they are discarded.
 //!
-//! A ring racing a close may still deliver: the two are ordered against each
-//! other by the atomic, so the wake either happens fully before the close or is
-//! suppressed by it, and a wake delivered just before the close simply
-//! schedules a task that then finds nothing to do. What cannot happen is a wake
-//! delivered *through* a dropped waker, which is the only outcome that matters.
+//! A ring racing a close may still deliver. The two are ordered against each
+//! other by the atomic, so the wake happens fully before the close or is
+//! suppressed by it, and one delivered just before schedules a task that then
+//! finds nothing to do. What cannot happen is a wake delivered *through* a
+//! dropped waker, which is the only outcome that matters.
 //!
 //! [`Outstanding`]: crate::outstanding
 //! [`register`]: Doorbell::register
@@ -233,9 +230,9 @@ mod tests {
         let (counter, waker) = Counter::waker();
         bell.close();
 
-        // Nothing forbids a late registration — a notifier and a receiver shut
-        // down independently — so the closed flag rather than the absence of a
-        // waker has to be what stops the wake.
+        // Nothing forbids a late registration: a notifier and a receiver shut
+        // down independently. So the closed flag, rather than the absence of a
+        // waker, has to be what stops the wake.
         bell.register(&waker);
         bell.ring();
         assert_eq!(counter.count(), 0);
@@ -260,14 +257,14 @@ mod tests {
 
 /// Exhaustive interleavings of the two races the protocol exists to settle.
 ///
-/// One caveat, and it is the reason these models are shaped the way they are:
+/// One caveat, and it is why these models are shaped the way they are:
 /// `AtomicWaker` is built on `core::sync::atomic` and has no loom support, so
-/// loom cannot see inside it and does not explore its interior orderings. What
-/// these models do explore is everything around it — the closed flag, the
-/// register-then-check order, and the predicate a notifier publishes before
-/// ringing — with the real [`Doorbell`] code running. Wake delivery is observed
-/// through a loom atomic in the waker itself, so the assertions are on state
-/// loom does track.
+/// loom cannot see inside it or explore its interior orderings. What these
+/// models do explore, with the real [`Doorbell`] code running, is everything
+/// around it: the closed flag, the register-then-check order, and the predicate
+/// a notifier publishes before ringing. Wake delivery is observed through a
+/// loom atomic in the waker itself, so the assertions are on state loom
+/// tracks.
 #[cfg(all(test, loom))]
 mod loom_tests {
     use super::*;

@@ -16,7 +16,7 @@ fmt-check:
 lint:
     cargo clippy --workspace --all-targets -- -D warnings
 
-# `--all-targets` covers lib, bins, tests and benches — and deliberately excludes
+# `--all-targets` covers lib, bins, tests and benches, and deliberately excludes
 # doctests, which is why `doc-test` exists separately rather than as a flag here.
 unit:
     cargo test --workspace --all-targets
@@ -50,7 +50,7 @@ doc-docsrs:
 #
 # The loop is identical across drivers and only the host shim differs, so what
 # this catches is a shim that stopped compiling or stopped agreeing with the
-# loop — which nothing else would notice, since the default build only ever
+# loop, which nothing else would notice, since the default build only ever
 # exercises one of them.
 test-drivers:
     cargo test -p grommet --lib --no-default-features --features driver-tokio
@@ -60,7 +60,7 @@ test-drivers:
 # This is what a musl image, an air-gapped build, or a distribution package that
 # refuses a build-time download actually compiles. It has no C toolchain, no
 # network fetch and no libhwloc, so nothing else in this file would notice it
-# breaking — and what breaks it is usually a `#[cfg]` that drifted rather than
+# breaking, and what breaks it is usually a `#[cfg]` that drifted rather than
 # anything anyone would think to test.
 #
 # The example is deliberately absent: it demonstrates hardware placement, so
@@ -101,7 +101,7 @@ sim:
     RUSTFLAGS="--cfg sim --cfg fault_injection" cargo test --workspace --all-targets \
         --features accounts/sim --profile sim
 
-# Exhaustive interleaving checks on the reactor's wake protocol — the ready
+# Exhaustive interleaving checks on the reactor's wake protocol: the ready
 # bits and the register-early discipline the parked loop depends on. Release,
 # because loom explores every ordering and a debug build multiplies that.
 loom:

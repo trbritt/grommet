@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "accounts"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "ahash",
  "axum",
@@ -938,21 +938,23 @@ checksum = "e4eba85ea1d0a966a983acd07deee566e67395d2d96b6fb39e62b5a833f1eb0b"
 
 [[package]]
 name = "grommet"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "ahash",
  "crossbeam-utils",
  "futures",
  "grommet-core",
  "grommet-topology",
+ "hdrhistogram",
  "loom",
  "parking_lot",
+ "quanta",
  "tokio",
 ]
 
 [[package]]
 name = "grommet-core"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "ahash",
  "crossbeam-utils",
@@ -962,11 +964,11 @@ dependencies = [
 
 [[package]]
 name = "grommet-macros"
-version = "0.1.3"
+version = "0.1.4"
 
 [[package]]
 name = "grommet-offload"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "grommet",
  "rayon",
@@ -975,7 +977,7 @@ dependencies = [
 
 [[package]]
 name = "grommet-testkit"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "grommet",
  "grommet-core",
@@ -984,7 +986,7 @@ dependencies = [
 
 [[package]]
 name = "grommet-topology"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "hwlocality",
 ]
@@ -1033,6 +1035,16 @@ name = "hashbrown"
 version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
+
+[[package]]
+name = "hdrhistogram"
+version = "7.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f49d1053f4708f0af3cf9fc5bffc7e68a914a3c45becb231c80068c9c3f78bea"
+dependencies = [
+ "byteorder",
+ "num-traits",
+]
 
 [[package]]
 name = "heck"
@@ -1863,6 +1875,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "quanta"
+version = "0.12.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f3ab5a9d756f0d97bdc89019bd2e4ea098cf9cde50ee7564dde6b81ccc8f06c7"
+dependencies = [
+ "crossbeam-utils",
+ "libc",
+ "once_cell",
+ "raw-cpuid",
+ "wasi 0.11.1+wasi-snapshot-preview1",
+ "web-sys",
+ "winapi",
+]
+
+[[package]]
 name = "quote"
 version = "1.0.47"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1946,6 +1973,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f703f4665700daf5512dcca5f43afa6af89f09db47fb56be587f80636bda2d41"
 dependencies = [
  "rand_core 0.9.5",
+]
+
+[[package]]
+name = "raw-cpuid"
+version = "11.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "498cd0dc59d73224351ee52a95fee0f1a617a2eae0e7d9d720cc622c73a54186"
+dependencies = [
+ "bitflags",
 ]
 
 [[package]]
@@ -3021,6 +3057,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "winapi"
+version = "0.3.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5c839a674fcd7a98952e593242ea400abe93992746761e38641405d28b00f419"
+dependencies = [
+ "winapi-i686-pc-windows-gnu",
+ "winapi-x86_64-pc-windows-gnu",
+]
+
+[[package]]
+name = "winapi-i686-pc-windows-gnu"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ac3b87c63620426dd9b991e5ce0329eff545bccbbb34f3be09ff6fb6ab51b7b6"
+
+[[package]]
 name = "winapi-util"
 version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3028,6 +3080,12 @@ checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
  "windows-sys 0.61.2",
 ]
+
+[[package]]
+name = "winapi-x86_64-pc-windows-gnu"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "712e227841d057c1ee1cd2fb22fa7e5a5461ae8e48fa2ca79ec42cfc1931183f"
 
 [[package]]
 name = "windows-link"

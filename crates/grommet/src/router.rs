@@ -30,8 +30,8 @@ const DEFERRED_SHARDS: usize = DEFERRED_WORDS * 64;
 ///
 /// A batch pushes into each shard's ring and tells that shard once at the end,
 /// rather than once per item. What that saves is the sequentially consistent
-/// fence each announcement carries — the doorbell coalesces the wake itself
-/// either way — so a batch of sixty-four items for one key's shard pays one
+/// fence each announcement carries, since the doorbell coalesces the wake
+/// itself either way: a batch of sixty-four items for one key's shard pays one
 /// fence instead of sixty-four.
 #[derive(Default)]
 struct Deferred {
@@ -674,7 +674,7 @@ mod batching_tests {
 
     /// The hazard deferral introduces, and the reason it is confined to this
     /// module. A batch deep enough to fill a mailbox has to wait partway
-    /// through — and the shard it waits on is holding the very items whose
+    /// through, and the shard it waits on is holding the very items whose
     /// announcement it deferred. Skip that announcement and the batch is not
     /// slow, it is stopped.
     #[tokio::test]

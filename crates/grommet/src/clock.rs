@@ -8,21 +8,44 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 pub trait Clock: Clone + Send + Sync + 'static {
     fn now(&self) -> Duration;
 }
 
-/// The production clock: a monotonic `Instant` captured at construction.
-#[derive(Clone, Copy, Debug)]
+/// The production clock: a monotonic reading taken against an origin captured
+/// at construction.
+///
+/// Backed by the CPU's cycle counter where the platform has a usable one, and
+/// by the operating system's monotonic clock where it does not. That choice is
+/// made at construction rather than compile time, so a machine without an
+/// invariant counter still gets a correct clock, just a slower one.
+///
+/// It matters because the reactor reads the clock several times per turn, and
+/// on this machine `Instant::now` costs about 28ns against a scheduler
+/// operation of about 15. Reading the counter costs about 1.5.
+///
+/// # Startup cost
+///
+/// The first clock built in a process spends about 200ms calibrating the
+/// counter against the operating system's clock. It is paid once, globally, and
+/// [`Builder::new`] builds its clock on the calling thread before any shard
+/// starts, so it lands at startup rather than on a pinned thread or a hot path.
+/// A process that wants it earlier can construct a `SystemClock` and drop it.
+///
+/// [`Builder::new`]: crate::scheduler::Builder::new
+#[derive(Clone, Debug)]
 pub struct SystemClock {
-    origin: Instant,
+    clock: quanta::Clock,
+    origin: quanta::Instant,
 }
 
 impl SystemClock {
     pub fn new() -> Self {
-        Self { origin: Instant::now() }
+        let clock = quanta::Clock::new();
+        let origin = clock.now();
+        Self { clock, origin }
     }
 }
 
@@ -35,7 +58,11 @@ impl Default for SystemClock {
 impl Clock for SystemClock {
     #[inline]
     fn now(&self) -> Duration {
-        self.origin.elapsed()
+        // Saturating: `duration_since` yields zero rather than panicking if a
+        // reading ever lands before the origin, which a counter that is not
+        // perfectly invariant across cores can do. A deadline computed from
+        // zero fires immediately, which is the safe direction.
+        self.clock.now().duration_since(self.origin)
     }
 }
 
@@ -78,6 +105,21 @@ mod tests {
         assert_eq!(handle.now(), Duration::from_millis(250));
         clock.set(Duration::from_secs(9));
         assert_eq!(handle.now(), Duration::from_secs(9));
+    }
+
+    #[test]
+    fn clones_of_a_system_clock_share_one_origin() {
+        // Deadlines are compared across handles: the router stamps arrival with
+        // its clone and the shard judges expiry with another. Two origins would
+        // make that comparison meaningless in a way nothing would report.
+        let clock = SystemClock::new();
+        let handle = clock.clone();
+        let (first, second) = (clock.now(), handle.now());
+        let apart = second.saturating_sub(first);
+        assert!(
+            apart < Duration::from_millis(1),
+            "clones disagreed by {apart:?}, so they are not reading one timeline"
+        );
     }
 
     #[test]
