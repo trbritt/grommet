@@ -199,7 +199,9 @@ mutants-shard INDEX TOTAL:
 mutants-diff BASE="origin/main":
     #!/usr/bin/env bash
     set -euo pipefail
-    patch="$(mktemp -t mutants-diff)"
+    # An explicit `XXXXXX` template rather than `-t`: BSD mktemp reads `-t` as a
+    # filename prefix, GNU reads it as a template and rejects one without X's.
+    patch="$(mktemp "${TMPDIR:-/tmp}/mutants-diff.XXXXXX")"
     trap 'rm -f "$patch"' EXIT
     git diff --merge-base '{{BASE}}' > "$patch"
     just mutants --in-diff "$patch"
