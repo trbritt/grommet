@@ -1018,6 +1018,35 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn shutdown_flushes_more_keys_than_it_can_hold_in_flight_at_once() {
+        let processor = Recorder::new();
+        let log = processor.log.clone();
+        let mut cfg = config();
+        // One eviction flush in flight at a time. The budget is a running
+        // count, handed back as each flush completes, so with a cap this tight
+        // every key after the first depends on the previous one having given
+        // its slot up. The default of 256 is wider than any test evicts, which
+        // is why nothing noticed that the count is only ever spent.
+        cfg.flush_slots = 1;
+
+        drive(processor, cfg, |router, _clock| async move {
+            for key in 1..=4u64 {
+                router.submit(Item::new(key)).await.unwrap();
+            }
+            drop(router);
+        })
+        .await;
+
+        let mut evicted = log.borrow().evicted.clone();
+        evicted.sort_unstable();
+        assert_eq!(
+            evicted,
+            vec![(1, 1), (2, 1), (3, 1), (4, 1)],
+            "a flush budget that is never returned strands every key after the first"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn state_still_resident_at_shutdown_is_flushed_before_the_shard_exits() {
         let processor = Recorder::new();
         let log = processor.log.clone();

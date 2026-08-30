@@ -289,7 +289,8 @@ fn physical_cores(
     topology.objects_with_type(ObjectType::PU).filter_map(&describe).collect()
 }
 
-#[cfg(all(test, feature = "hwloc"))]
+#[cfg(test)]
+#[cfg(feature = "hwloc")]
 mod tests {
     use super::*;
     use crate::cgroup::QuotaSource;

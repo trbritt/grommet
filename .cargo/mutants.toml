@@ -1,6 +1,14 @@
-# Run the cross-crate conformance, fault and Turmoil harnesses for every mutant.
-# Without this, cargo-mutants only tests the package containing the mutation.
-test_workspace = true
+# The packages whose tests can observe a mutant. Not `test_workspace`: a mutant
+# in the scheduler is mostly caught by the simulation and the conformance and
+# fault harnesses, which live in other crates, but nothing in `grommet-macros`,
+# `grommet-offload` or `grommet-topology` can see one.
+test_package = ["grommet", "grommet-core", "grommet-testkit", "accounts"]
+
+# Cargo only accepts `--features accounts/sim` when `accounts` is in the package
+# selection, and the baseline's selection is the packages that contain mutants,
+# not the list above. Narrow that -- as `--in-diff` does -- and the run dies
+# before the first mutant. Naming it here puts it in every invocation.
+additional_cargo_args = ["--package", "accounts"]
 
 # Score decision-bearing behaviour that deterministic tests can reach.
 # Infrastructure and adapters are a separate evidence domain: a green simulator
@@ -51,4 +59,42 @@ exclude_re = [
     # workload while catching nothing. What callers rely on is that it is
     # deterministic and expensive, and that is what its own tests check.
     "heavy_revalue",
+    # Nothing reads either. Pinning them would take tests asserting on rendered
+    # text, which fails on any rewording and catches nothing. Remove this line
+    # first if an error's text ever becomes something a caller parses.
+    "fmt::(Debug|Display) for",
+    # A set with no ready words has no summary words either, so deleting
+    # `0 => false` falls through to `(0..0).any(..)` and returns the same.
+    "delete match arm 0 in ReadySet::has_ready",
+    # `try_send_deferred` already returns `Closed` at the top, so this re-check
+    # is reached only when `departed` turns true between the two loads. Real
+    # guard, unreachable without a race.
+    "replace match guard shared.departed.* with false in Mailbox",
+    # Disarming happens only once the guard's four bit sets are zero, so leaving
+    # it armed changes nothing: the `Drop` that then restores finds nothing.
+    "RestoreGuard<'a>::disarm",
+    # Backstop for the attribute convention below. A mutated test helper can
+    # only ever be reported as missed.
+    "\\btests::",
 ]
+
+# Test modules gated on more than `test` must write each condition as its own
+# attribute -- `#[cfg(test)]` then `#[cfg(not(loom))]`, not
+# `#[cfg(all(test, not(loom)))]`. cargo-mutants parses the attribute rather than
+# evaluating it and does not recognise the `all(..)` form, so collapsing them
+# puts every test helper back into the population. That was 124 of 1,240.
+
+# A mutant that breaks the ready set or the timing wheel usually hangs a test
+# rather than failing one. nextest kills the individual test -- see the
+# `mutants` profile in `.config/nextest.toml` -- so it is scored as caught
+# instead of costing the whole-run timeout, and it stops at the first failure.
+# The cost is doctests, which nextest does not run; `just doc-test` still does.
+test_tool = "nextest"
+
+# A backstop against a wedged build, not a target to build under. A mutant low
+# in the graph rebuilds everything above it and legitimately approaches the cold
+# baseline, so this sits well clear of the worst honest case: a build timeout is
+# scored as a kill, and clipping real builds would flatter the tree.
+#
+# The test timeout has no config key and is set in `just mutants`.
+build_timeout_multiplier = 3.0

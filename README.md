@@ -243,6 +243,7 @@ just miri       # undefined-behaviour check over the unsafe modules
 just loom       # exhaustive interleavings of the ring, mailbox and wake protocol
 just coverage   # MC/DC instrumentation and a decision-layer line gate
 just mutants    # assertion-strength check under the simulation configuration
+just mutants-diff       # the same, scoped to what this branch changed
 just fuzz-list  # exact Bolero target names (run before fuzzing)
 just fuzz TARGET        # coverage-guided model/fault fuzzing with ASan
 just reduce TARGET      # replay and minimize one saved failure

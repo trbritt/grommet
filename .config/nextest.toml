@@ -1,0 +1,27 @@
+# The profile the mutation gate runs under, selected by `NEXTEST_PROFILE` in
+# `just mutants`. There is deliberately no `default` profile: nothing in the
+# ordinary gate runs under nextest, so there is nothing here to drift from
+# `just unit`.
+
+[profile.mutants]
+# A mutant that breaks the ready set or the timing wheel hangs a test rather
+# than failing it. Killing the test itself scores that as the kill it is, in a
+# fraction of the whole-run timeout. Ten seconds is roughly seven times the
+# slowest test here; erring long is deliberate, since a test killed for being
+# slow counts as a kill.
+slow-timeout = { period = "10s", terminate-after = 1 }
+
+# A mutant is caught the moment one test notices it. The rest of the suite is
+# then pure cost -- the opposite of what the ordinary gate wants.
+fail-fast = true
+
+# The suite is deterministic, so a retry would only hide a real kill.
+retries = 0
+
+# cargo-mutants runs several of these at once under a jobserver; fanning out to
+# every core as well oversubscribes the runner and inflates the timeouts above.
+test-threads = 2
+
+status-level = "fail"
+final-status-level = "fail"
+failure-output = "final"

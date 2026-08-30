@@ -127,7 +127,8 @@ impl std::fmt::Debug for Doorbell {
     }
 }
 
-#[cfg(all(test, not(loom)))]
+#[cfg(test)]
+#[cfg(not(loom))]
 mod tests {
     use super::*;
     use std::sync::Arc;
@@ -265,7 +266,8 @@ mod tests {
 /// a notifier publishes before ringing. Wake delivery is observed through a
 /// loom atomic in the waker itself, so the assertions are on state loom
 /// tracks.
-#[cfg(all(test, loom))]
+#[cfg(test)]
+#[cfg(loom)]
 mod loom_tests {
     use super::*;
     use loom::sync::atomic::AtomicBool;
