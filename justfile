@@ -127,10 +127,82 @@ coverage:
         --ignore-filename-regex '(examples/accounts/src/(prod|frontdoor|net|main)\.rs|crates/grommet-macros/)' \
         --fail-under-lines 95
 
-# Mutation testing runs the whole workspace suite for every production mutant.
-mutants:
-    RUSTFLAGS="--cfg sim --cfg fault_injection" cargo mutants --workspace \
-        --features accounts/sim
+# Mutation testing: change the code on purpose and check a test notices.
+#
+# What runs against each mutant, and what is left out of the population, is
+# decided in `.cargo/mutants.toml`; the reasoning lives there rather than here.
+# Needs `cargo-nextest`, which that file selects as the test tool.
+#
+# The timeout is absolute rather than derived. cargo-mutants would otherwise set
+# it to five times its baseline, but the baseline runs only the packages that
+# contain mutants while each mutant runs the wider set the config names, so the
+# derived value is measured against a smaller suite than it is applied to --
+# which is what turned slow-but-healthy mutants into timeouts.
+#
+# Sixty seconds is deliberately loose. It is no longer what ends a hang: the
+# nextest profile kills the individual hung test at ten, which is both faster
+# and reported as the kill it is. What is left for this to catch is the whole
+# run wedging somewhere no single test owns, so it wants to be far enough above
+# a healthy run never to fire on one. A measured shard peaked at 12.7s for the
+# phase on a loaded machine, against about three on a CI runner.
+#
+# BEWARE running this bare over the whole population on a developer machine.
+# cargo-mutants builds every mutant into one scratch `target/` and never
+# collects the artifacts, so the directory grows by a set of rlibs per mutant
+# for as long as the run lasts. A sweep here took nine hours and tens of
+# gigabytes: the median build went from 4.8s over the first hundred mutants to
+# 50.7s by the four hundredth, and once the disk filled the tree copies began
+# landing incomplete, so the remaining five hours reported mutants as unviable
+# because the copied manifest no longer parsed rather than because anything was
+# wrong with the code. Check free space first, and prefer `mutants-shard` below
+# to take the population a bounded piece at a time.
+#
+# CI never runs this recipe bare. It splits the sweep across shards nightly,
+# which is what keeps each build directory small, and gates pull requests on
+# the diff; both are below.
+#
+# `NEXTEST_PROFILE` is how the profile gets selected: cargo-mutants runs a bare
+# `cargo nextest run`, and its own `--profile` means the *cargo* profile, so
+# without this the run silently uses nextest's defaults -- no fail-fast, no
+# per-test kill -- and the settings in `.config/nextest.toml` do nothing.
+mutants *ARGS:
+    RUSTFLAGS="--cfg sim --cfg fault_injection" NEXTEST_PROFILE=mutants \
+        cargo mutants --workspace --features accounts/sim --timeout 60 {{ARGS}}
+
+# One shard of the nightly sweep, as `just mutants-shard 3 8`.
+#
+# Round-robin rather than consecutive ranges. Mutants are generated in source
+# order, and what a mutant costs depends on where it is: mutating `grommet-core`
+# rebuilds every crate above it, mutating the example rebuilds only the example.
+# Contiguous slices therefore hand one runner all of `grommet-core` and another
+# all of `accounts`, and the sweep takes as long as its slowest shard. Dealing
+# the mutants out evens that.
+#
+# The cost is build locality: consecutive mutants land in different files, so
+# each rebuild is larger than it would be walking one file top to bottom. That
+# is the trade -- a slower average mutant for shards that finish together, which
+# is the number that decides whether the sweep fits in the night.
+#
+# Shards are numbered from zero, so `just mutants-shard 0 16` is the first of
+# the sixteen CI runs nightly. It is also the way to sweep locally without the
+# scratch directory growing without bound: each shard is a fresh build
+# directory over some seventy mutants, which is a quarter of an hour rather
+# than an evening.
+mutants-shard INDEX TOTAL:
+    just mutants --shard '{{INDEX}}/{{TOTAL}}' --sharding round-robin
+
+# Only the mutants in code a branch actually changed.
+#
+# This is the pull request gate: a sweep is hours, and almost all of it re-tests
+# code the branch never touched. Takes a diff against the merge base, so it
+# scores the lines under review and nothing else.
+mutants-diff BASE="origin/main":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    patch="$(mktemp -t mutants-diff)"
+    trap 'rm -f "$patch"' EXIT
+    git diff --merge-base '{{BASE}}' > "$patch"
+    just mutants --in-diff "$patch"
 
 fuzz-list:
     RUSTFLAGS="--cfg sim --cfg fault_injection" cargo bolero list -p accounts --features sim

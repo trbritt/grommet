@@ -1,0 +1,46 @@
+# Profiles for `cargo nextest`. The default profile is deliberately absent:
+# nothing in the ordinary gate runs under nextest, so there is nothing here to
+# drift from `just unit`.
+
+# The profile the mutation gate runs under.
+#
+# A mutant that breaks the scheduler, the timing wheel or the ready set usually
+# does not fail a test: it hangs one. The reactor parks waiting for a wakeup the
+# mutated code will never deliver, and the test sits there until something kills
+# it. Under `cargo test` the only thing that can is cargo-mutants' own whole-run
+# timeout, so every such mutant costs the full timeout and lands in the
+# ambiguous TIMEOUT bucket rather than being reported as caught.
+#
+# `terminate-after` moves that kill down to the individual test. A hung test is
+# killed and reported as a failure, which is a kill like any other, and the run
+# gets on with it.
+#
+# Ten seconds is set against what the suite actually does: the two slowest tests
+# here are the randomized model comparisons in `timer` and `accounts`, at about
+# a second and a half each, and every other test is far under that. Seven times
+# the slowest test leaves room for a loaded runner while still ending a hang in
+# a third of the time the whole-run timeout would take. Erring long is
+# deliberate -- a test killed for being slow is scored as a kill, so a period
+# set too tight would report healthy mutants as caught.
+[profile.mutants]
+slow-timeout = { period = "10s", terminate-after = 1 }
+
+# A mutant is caught the moment one test notices it; the rest of the suite is
+# then pure cost. This is the opposite of what the ordinary gate wants, which is
+# why it is set here and not in a default profile.
+fail-fast = true
+
+# The suite is deterministic and self-contained, so retries would only hide a
+# real kill behind a flake.
+retries = 0
+
+# Cargo-mutants runs several of these at once and caps total concurrency with a
+# jobserver; letting each run fan out to every core as well oversubscribes the
+# runner and inflates exactly the timeouts the profile above is trying to make
+# meaningful.
+test-threads = 2
+
+status-level = "fail"
+final-status-level = "fail"
+failure-output = "final"
+

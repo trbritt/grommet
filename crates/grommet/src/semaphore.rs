@@ -134,7 +134,8 @@ impl Drop for Permit {
     }
 }
 
-#[cfg(all(test, not(loom)))]
+#[cfg(test)]
+#[cfg(not(loom))]
 mod tests {
     use super::*;
     use std::future::Future;
@@ -281,7 +282,8 @@ mod tests {
 /// The parking half belongs to the wait list and is modelled with the mailbox.
 /// What is specific here is the other half of the pair: the permit counter, and
 /// the fence between giving one back and looking for somebody to give it to.
-#[cfg(all(test, loom))]
+#[cfg(test)]
+#[cfg(loom)]
 mod loom_tests {
     use super::*;
     use loom::sync::atomic::AtomicBool;

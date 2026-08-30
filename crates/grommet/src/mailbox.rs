@@ -427,6 +427,117 @@ pub enum TryRecvError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::task::{Context, Waker};
+
+    /// Records a wake, for the assertions about who gets rung and when.
+    struct Flag(std::sync::atomic::AtomicUsize);
+
+    impl std::task::Wake for Flag {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    impl Flag {
+        fn new() -> Arc<Self> {
+            Arc::new(Flag(std::sync::atomic::AtomicUsize::new(0)))
+        }
+
+        fn wakes(&self) -> usize {
+            self.0.load(Ordering::SeqCst)
+        }
+    }
+
+    /// Park an inbox on an empty ring and return the flag that records its wake.
+    fn parked<W>(inbox: &mut Inbox<W>) -> Arc<Flag> {
+        let flag = Flag::new();
+        let waker = Waker::from(flag.clone());
+        let mut cx = Context::from_waker(&waker);
+        assert!(inbox.poll_recv(&mut cx).is_pending(), "an empty inbox parks");
+        flag
+    }
+
+    #[test]
+    fn only_the_last_sender_to_leave_wakes_the_shard() {
+        let (mailbox, mut inbox) = channel::<u64>(4);
+        let second = mailbox.clone();
+        let flag = parked(&mut inbox);
+
+        // While a sender remains, the shard has no reason to stop waiting: more
+        // work can still arrive.
+        drop(second);
+        assert_eq!(flag.wakes(), 0, "a departing sender that is not the last announces nothing");
+
+        // The last one out is what tells a parked shard to drain and exit
+        // rather than sleep forever on a mailbox nobody can fill.
+        drop(mailbox);
+        assert_eq!(flag.wakes(), 1, "the last sender to leave must wake the shard");
+    }
+
+    #[test]
+    fn a_full_mailbox_whose_shard_has_gone_reports_closed_not_full() {
+        let (mailbox, inbox) = channel::<u64>(1);
+        mailbox.try_send_deferred(1).unwrap();
+
+        // The ring is full *and* the receiver is gone. Reporting this as full
+        // would send the caller back to wait for room that will never be made,
+        // which is the retry loop this re-check exists to prevent.
+        drop(inbox);
+        assert_eq!(mailbox.try_send_deferred(2), Err(TrySendError::Closed(2)));
+    }
+
+    #[tokio::test]
+    async fn releasing_capacity_wakes_one_sender_per_slot_it_freed() {
+        let (mailbox, mut inbox) = channel::<u64>(2);
+        mailbox.try_send(1).unwrap();
+        mailbox.try_send(2).unwrap();
+
+        // Two senders come to rest on a full ring.
+        let first = mailbox.clone();
+        let second = mailbox.clone();
+        let mut send_first = Box::pin(first.send(3));
+        let mut send_second = Box::pin(second.send(4));
+        let first_flag = Flag::new();
+        let second_flag = Flag::new();
+        let first_waker = Waker::from(first_flag.clone());
+        let second_waker = Waker::from(second_flag.clone());
+        assert!(send_first.as_mut().poll(&mut Context::from_waker(&first_waker)).is_pending());
+        assert!(send_second.as_mut().poll(&mut Context::from_waker(&second_waker)).is_pending());
+        assert!(inbox.shared.waiters.any());
+
+        // Drained with `take`, not `try_recv`: `try_recv` releases after every
+        // single item, so it can never hold more than one freed slot and the
+        // loop that hands them back never runs more than once. A shard drains a
+        // burst and releases at the end, which is the path that has more than
+        // one slot to give -- and the only one where handing back just the
+        // first is different from handing back all of them.
+        assert_eq!(inbox.take(), Some(1));
+        assert_eq!(inbox.take(), Some(2));
+        assert_eq!(inbox.freed, 2, "a burst drain accumulates the slots it freed");
+        inbox.release_capacity();
+
+        assert_eq!(first_flag.wakes(), 1, "the first waiting sender was handed a slot");
+        assert_eq!(second_flag.wakes(), 1, "so was the second: two slots freed, two senders");
+    }
+
+    #[test]
+    fn a_receive_clears_the_parked_flag_so_senders_stop_ringing() {
+        let (mailbox, mut inbox) = channel::<u64>(4);
+        let _flag = parked(&mut inbox);
+        assert!(inbox.shared.parked.load(Ordering::Relaxed), "the poll above parked it");
+
+        mailbox.try_send(7).unwrap();
+        assert_eq!(inbox.try_recv().unwrap(), 7);
+
+        // A running shard must not look parked: every sender reads this line
+        // after every push, and a stale `true` costs each of them a doorbell
+        // ring the shard does not need.
+        assert!(!inbox.shared.parked.load(Ordering::Relaxed), "a drain marks the shard running");
+    }
 
     #[tokio::test]
     async fn items_arrive_in_submission_order() {
@@ -508,7 +619,8 @@ mod tests {
     }
 }
 
-#[cfg(all(test, not(loom)))]
+#[cfg(test)]
+#[cfg(not(loom))]
 mod backpressure_tests {
     use super::*;
     use std::future::Future;
@@ -655,7 +767,8 @@ mod backpressure_tests {
 /// these are for, and it is why the fences in this module are sequentially
 /// consistent rather than merely release and acquire: under acquire and release
 /// both of these models fail.
-#[cfg(all(test, loom))]
+#[cfg(test)]
+#[cfg(loom)]
 mod loom_tests {
     use super::*;
     use loom::sync::atomic::AtomicBool;
@@ -749,7 +862,8 @@ mod loom_tests {
     }
 }
 
-#[cfg(all(test, not(loom)))]
+#[cfg(test)]
+#[cfg(not(loom))]
 mod starvation_tests {
     use super::*;
     use std::future::Future;

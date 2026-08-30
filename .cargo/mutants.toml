@@ -1,6 +1,35 @@
-# Run the cross-crate conformance, fault and Turmoil harnesses for every mutant.
-# Without this, cargo-mutants only tests the package containing the mutation.
-test_workspace = true
+# Which packages' tests run against a mutant.
+#
+# A mutant in the scheduler is not caught by the scheduler's own unit tests
+# alone: most of them are caught by the deterministic simulation and the
+# conformance and fault harnesses, which live in other packages. So the tests
+# that run have to reach across crate boundaries.
+#
+# Naming the four packages that can observe a mutant, rather than setting
+# `test_workspace`, is what keeps that from meaning "the entire workspace".
+# `grommet-macros`, `grommet-offload` and `grommet-topology` are excluded from
+# mutation below, and nothing in their suites can see a change to a timing
+# wheel, a ready set or a mailbox, so running them for all ~1,100 mutants is
+# time spent to learn nothing.
+test_package = ["grommet", "grommet-core", "grommet-testkit", "accounts"]
+
+# `accounts` is named a second time, as a cargo argument, so that it is in the
+# package selection of *every* invocation and not only the mutant runs.
+#
+# The simulation is switched on with `--features accounts/sim`, and cargo will
+# only accept a package-qualified feature for a package it has been asked to
+# build. `test_package` above covers the mutant runs, but the baseline is not
+# run against that set: cargo-mutants builds it from the packages that actually
+# contain mutants. A sweep gets away with this because mutants land in
+# `accounts` too, but narrow it -- which is exactly what the `--in-diff` gate on
+# pull requests does -- and the baseline is one package, the feature no longer
+# resolves, and the whole run dies before the first mutant with
+# `the package 'grommet' does not contain this feature: accounts/sim`.
+#
+# Naming it here puts it in the baseline's selection as well. It is a duplicate
+# for the mutant runs, which cargo accepts, and it is not extra work: the
+# baseline builds what the first mutant would have had to build anyway.
+additional_cargo_args = ["--package", "accounts"]
 
 # Score decision-bearing behaviour that deterministic tests can reach.
 # Infrastructure and adapters are a separate evidence domain: a green simulator
@@ -51,4 +80,94 @@ exclude_re = [
     # workload while catching nothing. What callers rely on is that it is
     # deterministic and expensive, and that is what its own tests check.
     "heavy_revalue",
+    # `Debug` and `Display` bodies, replaced with a successful empty write.
+    #
+    # Nothing in this workspace reads either. Killing these would take tests
+    # that assert on rendered text -- the shape of a `Debug` dump, the wording
+    # of an error -- which pins formatting no caller depends on and fails on
+    # any rewording while catching nothing. What the error types are actually
+    # relied on for is their variants, and those are matched on by tests.
+    #
+    # This is 21 mutants and 5 of the surviving ones. It is a deliberate
+    # narrowing of the gate, not an oversight: if an error's text ever becomes
+    # something a caller parses, this line is what has to come out first.
+    "fmt::(Debug|Display) for",
+    # `has_ready`'s empty-set arm. A set with no ready words also has no
+    # summary words, so deleting `0 => false` falls through to the general arm,
+    # which asks `(0..0).any(..)` and gets the same `false`. The two functions
+    # are indistinguishable for every input, which is a property of how
+    # `ReadySet::new` derives `summaries` from `words`, not a gap in the tests
+    # that now cover this type directly.
+    "delete match arm 0 in ReadySet::has_ready",
+    # The re-check after a failed push. `try_send_deferred` already returns
+    # `Closed` at the top when the receiver has departed, so this second look is
+    # only ever reached when `departed` turns true *between* the two loads --
+    # a sender that raced a shard's exit. No single-threaded test can enter that
+    # window, and a threaded one would be asserting on a race it cannot force.
+    # What it guards against is real; the mutant is unreachable, not unnoticed.
+    "replace match guard shared.departed.* with false in Mailbox",
+    # `RestoreGuard::disarm`, replaced with a no-op. Disarming is only reached
+    # once the guard has handed everything back and its four bit sets are zero,
+    # which its own `debug_assert!`s state. Leaving it armed therefore changes
+    # nothing a caller can see: the `Drop` that then runs `restore` finds
+    # nothing to restore and, with no work in hand, rings nobody. What `armed`
+    # buys is the unwind path, and that path is scored by the tests either side
+    # of this line.
+    "RestoreGuard<'a>::disarm",
+    # Backstop for the `#[cfg(test)]` convention described below. Mutating a
+    # test helper scores the harness, not the code under test, and can only
+    # ever be reported as missed: nothing asserts on a fake waker's counter.
+    # Every module in this workspace whose name ends in `tests` is a test
+    # module, so this catches any that slip past the attribute rule.
+    "\\btests::",
 ]
+
+# Mutants inside test modules are not scored, which relies on a convention in
+# the source: a test module gated on more than `test` writes each condition as
+# its own attribute.
+#
+#     #[cfg(test)]
+#     #[cfg(not(loom))]
+#     mod tests { .. }
+#
+# rather than the equivalent `#[cfg(all(test, not(loom)))]`. cargo-mutants
+# recognises `#[cfg(test)]` and skips the item under it, but it parses the
+# attribute rather than evaluating it, and the `all(..)` form does not match:
+# collapsing these back into one attribute silently puts every fake waker,
+# counter and poll helper in the loom and non-loom suites back into the
+# population, where they can only be reported as missed. That was 124 of 1,240
+# mutants and 16 of 29 surviving ones before the split.
+
+# Hung mutants are ended by the test that hangs, not by the whole run.
+#
+# A mutant that breaks the ready set or the timing wheel does not usually fail a
+# test, it hangs one: the reactor parks for a wakeup the mutated code will never
+# send. Under `cargo test` nothing can end that except cargo-mutants' own
+# whole-run timeout, so each such mutant costs the full timeout and lands in the
+# ambiguous TIMEOUT bucket. nextest kills the individual test instead -- see the
+# `mutants` profile in `.config/nextest.toml` -- which reports the mutant as
+# caught, for a fraction of the time. It also stops at the first failing test
+# rather than finishing a suite whose verdict is already known.
+#
+# The cost is doctests, which nextest does not run. There are four in the
+# packages this gate tests: two compile-only, one ignored, and one that executes
+# -- the timing wheel walkthrough in `grommet-core/src/timer.rs`. That last one
+# is a real, if small, loss of scoring power, against a file that already
+# carries three hundred mutants' worth of unit tests including a randomized
+# comparison against a reference model. `just doc-test` still gates all four.
+test_tool = "nextest"
+
+# A backstop against a build wedging, not a target to build under.
+#
+# A mutant usually rebuilds one crate into a warm directory in a few seconds,
+# but one low in the graph rebuilds everything above it, and that legitimately
+# approaches the cold baseline: a measured shard put a mutant build at 73s
+# against a 77s baseline. So the multiplier is set well clear of the worst
+# honest case rather than just above the typical one -- a build timeout scores
+# the mutant as failed, and a cap that clips real builds would report the tree
+# as better tested than it is.
+#
+# The test timeout is passed on the command line instead: an absolute value has
+# no config key, and the derived alternative is measured against the wrong
+# suite. `just mutants` is where it is set, with the reasoning.
+build_timeout_multiplier = 3.0

@@ -364,7 +364,8 @@ impl<T> std::fmt::Debug for Consumer<T> {
     }
 }
 
-#[cfg(all(test, not(loom)))]
+#[cfg(test)]
+#[cfg(not(loom))]
 mod tests {
     use super::*;
     use std::collections::VecDeque;
@@ -563,7 +564,8 @@ mod tests {
 /// Every model here also gets the exclusion check for free: the value cells are
 /// loom's `UnsafeCell` under `--cfg loom`, so two overlapping accesses fail the
 /// model rather than being undefined behaviour that happens not to bite.
-#[cfg(all(test, loom))]
+#[cfg(test)]
+#[cfg(loom)]
 mod loom_tests {
     use super::*;
 

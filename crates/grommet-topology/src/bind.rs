@@ -132,7 +132,8 @@ impl Plan {
     }
 }
 
-#[cfg(all(test, feature = "hwloc"))]
+#[cfg(test)]
+#[cfg(feature = "hwloc")]
 mod tests {
     use super::*;
     use crate::Workload;

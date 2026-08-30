@@ -494,6 +494,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_rejected_batch_hands_over_the_reasons_as_well_as_the_work() {
+        let (sender, _receiver) = channel(1);
+        let router = Router::<Item, ManualClock, 2>::new(vec![sender], ManualClock::new());
+
+        // One fits, one is refused for its class, one overflows: two rejections
+        // with two different reasons.
+        let batch = vec![Item::new(1), Item { key: 2, class: 9, ttl: None }, Item::new(3)];
+        let error = router.try_submit_batch(batch).expect_err("the mailbox holds one");
+
+        // `into_work` drops the reason and `rejected` only lends the items, so
+        // this is the only accessor that hands a caller an owned refusal it can
+        // answer individually -- and it was the only one no test called.
+        let rejected = error.into_rejected();
+        assert_eq!(rejected.len(), 2, "every refusal is handed over, not merely counted");
+        assert!(matches!(rejected[0], SubmitError::InvalidClass(Item { key: 2, .. })));
+        assert!(matches!(rejected[1], SubmitError::Full(Item { key: 3, .. })));
+    }
+
+    #[tokio::test]
     async fn a_batch_hands_back_every_item_it_could_not_place() {
         let (sender, mut receiver) = channel(2);
         let router = Router::<Item, ManualClock, 2>::new(vec![sender], ManualClock::new());
@@ -641,9 +660,10 @@ mod tests {
 mod batching_tests {
     use super::*;
     use crate::clock::ManualClock;
-    use crate::mailbox::channel;
+    use crate::mailbox::{Inbox, channel};
     use grommet_core::ClassId;
     use std::future::Future;
+    use std::task::{Context, Waker};
 
     #[derive(Debug)]
     struct Item(u64);
@@ -754,5 +774,75 @@ mod batching_tests {
         // than losing a wake.
         assert!(!deferred.defer(DEFERRED_SHARDS));
         assert!(!deferred.defer(usize::MAX));
+    }
+
+    /// Records whether one shard was woken.
+    struct Flag(std::sync::atomic::AtomicBool);
+
+    impl std::task::Wake for Flag {
+        fn wake(self: std::sync::Arc<Self>) {
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+
+        fn wake_by_ref(self: &std::sync::Arc<Self>) {
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    impl Flag {
+        fn woken(&self) -> bool {
+            self.0.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    /// `announce` has to reach the shards that were deferred and no others.
+    ///
+    /// The companion test above covers `defer`, which writes the bitmap. This
+    /// covers reading it back, which is where the shard index is reconstructed
+    /// from a word and a bit: `word * 64 + bit`. Every earlier exercise of the
+    /// router uses a handful of shards, so that arithmetic only ever ran with
+    /// `word` zero and the bit low, where getting it wrong is invisible -- a
+    /// multiplication and an addition that both produce nothing from nothing.
+    ///
+    /// So the shards named here are chosen to make each part of it load-bearing:
+    /// 5 needs the bit added, 64 needs the word multiplied, 129 needs both, and
+    /// several in one word need the clear-lowest-bit step to actually advance.
+    #[test]
+    fn announcing_wakes_exactly_the_shards_that_were_deferred() {
+        const SHARDS: usize = 130;
+        const DEFERRED: [usize; 6] = [0, 5, 63, 64, 70, 129];
+
+        let (senders, receivers): (Vec<_>, Vec<Inbox<Envelope<Item>>>) =
+            (0..SHARDS).map(|_| channel::<Envelope<Item>>(4)).unzip();
+        let mut receivers = receivers;
+
+        // A shard is only rung while it is parked, so every one is parked first
+        // and given a waker that records the ring.
+        let flags: Vec<std::sync::Arc<Flag>> = (0..SHARDS)
+            .map(|_| std::sync::Arc::new(Flag(std::sync::atomic::AtomicBool::new(false))))
+            .collect();
+        for (inbox, flag) in receivers.iter_mut().zip(&flags) {
+            let waker = Waker::from(flag.clone());
+            let mut cx = Context::from_waker(&waker);
+            assert!(inbox.poll_recv(&mut cx).is_pending(), "an empty inbox parks");
+        }
+
+        let mut deferred = Deferred::default();
+        for shard in DEFERRED {
+            assert!(deferred.defer(shard));
+        }
+        deferred.announce(&senders);
+
+        for (shard, flag) in flags.iter().enumerate() {
+            assert_eq!(
+                flag.woken(),
+                DEFERRED.contains(&shard),
+                "shard {shard} was {} but should not have been",
+                if flag.woken() { "woken" } else { "left asleep" },
+            );
+        }
+
+        // The bitmap is spent, so a second announcement reaches nobody.
+        assert!(!deferred.any);
     }
 }

@@ -153,8 +153,13 @@ impl TimerId {
     pub fn from_raw(raw: u128) -> Option<Self> {
         let raw = NonZeroU128::new(raw)?;
         let id = Self(raw);
-        let (wheel, generation, index) = id.parts()?;
-        (wheel != 0 && generation != 0 && index != NIL).then_some(id)
+        // `parts` is the whole of the validation. It rejects a zero wheel,
+        // generation or encoded index, and the index it hands back is the
+        // encoded one minus a value it has already proved non-zero, so that
+        // index cannot be `NIL` either. Re-testing any of the three here would
+        // be a condition no input can make false.
+        id.parts()?;
+        Some(id)
     }
 
     fn parts(self) -> Option<(u32, u64, u32)> {
@@ -1191,9 +1196,42 @@ mod tests {
     }
 
     #[test]
+    fn rescheduling_separates_an_unrepresentable_tick_from_an_unreachable_one() {
+        let mut wheel = Ns::with_capacity(2);
+        let id = wheel.try_insert_at(4, 7).unwrap();
+
+        // `u64::MAX` is the sentinel for "no event", not a tick anyone can ask
+        // for. It is out of range whatever the wheel's current reach.
+        assert_eq!(wheel.reschedule_at(id, u64::MAX), Err(RescheduleError::TimeOutOfRange));
+
+        // `MAX_TICK` is representable, so it gets the other answer: too far for
+        // this wheel to file, not impossible to express. The two refusals mean
+        // different things to a caller, and testing only that "something big
+        // fails" cannot tell the boundary between them from either side of it.
+        assert_eq!(wheel.reschedule_at(id, MAX_TICK), Err(RescheduleError::DeadlineTooFar));
+
+        // Neither refusal disturbed the timer.
+        assert_eq!(wheel.reschedule_at(id, 6), Ok(()));
+        assert!(wheel.contains(id));
+    }
+
+    #[test]
     fn malformed_timer_ids_are_rejected() {
         assert!(TimerId::from_raw(0).is_none());
         assert!(TimerId::from_raw(1).is_none(), "wheel and generation fields are zero");
+
+        // Each field is rejected on its own account. Testing them only in
+        // combination, as the two cases above do, cannot tell the three
+        // conditions apart: any one of them explains the rejection, so a
+        // decoder that had stopped checking two of them would still pass.
+        //
+        // The layout is wheel in the top 32 bits, generation in the next 64,
+        // and the index, stored one above its real value, in the low 32.
+        const WHEEL: u128 = 1 << 96;
+        const GENERATION: u128 = 1 << 32;
+        assert!(TimerId::from_raw(GENERATION | 5).is_none(), "no wheel");
+        assert!(TimerId::from_raw(WHEEL | 5).is_none(), "no generation");
+        assert!(TimerId::from_raw(WHEEL | GENERATION).is_none(), "no index");
 
         let mut wheel = Ns::with_capacity(1);
         let id = wheel.try_insert_at(1, 1).unwrap();

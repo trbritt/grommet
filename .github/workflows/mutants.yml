@@ -1,0 +1,231 @@
+name: mutants
+
+# Mutation testing asks the question coverage cannot: not whether a line ran,
+# but whether anything would have complained if it were wrong. It answers by
+# changing the code on purpose -- flipping a comparison, dropping a call,
+# returning a default -- and rerunning the suite. A mutant that survives is a
+# line the tests execute without checking.
+#
+# It is also the most expensive gate in this repository by an order of
+# magnitude: every one of ~1,100 mutants is a rebuild and a test run, and on
+# one runner that is most of a working day. That is why it lives here rather
+# than in `ci.yml`, and why it is split two ways. Pull requests score only the lines they changed, which is
+# the feedback a review can actually act on. The whole population is swept
+# nightly, across shards, because nothing else has hours to give.
+#
+# What runs against each mutant, and what is left out of the population, is
+# decided in `.cargo/mutants.toml`. The invocations are `just` recipes so that
+# what CI runs and what a developer runs cannot drift apart.
+
+on:
+  pull_request:
+  schedule:
+    - cron: "23 8 * * *"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+# A force-push should not leave the superseded push's mutation run going. Only
+# the pull request gate is cancelled: the key is per-ref, so a scheduled sweep
+# on `main` is in its own group and never competes with a branch, and
+# cancelling one because somebody pushed would lose the only full run of the
+# day for results that take all night to reproduce.
+concurrency:
+  group: mutants-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  # The pull request gate: mutants in code this branch touched, and nothing
+  # else. Almost every mutant in the tree is in code the branch never changed,
+  # and re-proving those on each push is what made the full sweep unusable as a
+  # review signal. Scoped this way it is minutes, so a surviving mutant is
+  # reported while the change is still being written.
+  diff:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      # The diff is taken against the merge base, so the base branch has to be
+      # in the clone. The default shallow fetch does not contain it.
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-05-01
+      - uses: Swatinem/rust-cache@v2
+      # `protoc` builds the worked example's front door; `cargo-nextest` is the
+      # test tool `.cargo/mutants.toml` selects, and the run fails without it.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just,protoc,cargo-mutants,cargo-nextest
+      - run: just mutants-diff origin/${{ github.base_ref }}
+      # The logs name every surviving mutant, but the diffs that produced them
+      # are what a reviewer needs to judge whether a test is missing or the
+      # mutant is equivalent.
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutants-diff-out
+          path: mutants.out/
+
+  # The nightly sweep, split across runners.
+  #
+  # Sixteen shards puts each one near a quarter of an hour, against the two
+  # hours forty an unsharded run took here before it hit the job ceiling and
+  # reported nothing at all.
+  #
+  # The split costs slightly more total runner time than a coarser one would,
+  # not less: every shard pays its own cold baseline build, so sixteen of them
+  # is about twenty minutes of duplicated compiling across the matrix. That is
+  # bought deliberately. Standard runners are free on a public repository, so
+  # what the budget is actually spent on is wall-clock and headroom, and a
+  # quarter-hour shard has both to spare.
+  #
+  # Headroom against a specific failure: cargo-mutants builds every mutant into
+  # one scratch `target/` and never collects the artifacts, so the directory
+  # grows by a set of rlibs per mutant. On a developer machine with a nearly
+  # full disk that is measurable and then fatal -- a local sweep over this
+  # workspace went from a 4.8s median build over its first hundred mutants to
+  # 50.7s by its four hundredth, then filled the disk, after which tree copies
+  # landed incomplete and five hours of mutants were reported unviable because
+  # the copied manifest no longer parsed. CI has not shown this: builds there
+  # hold flat at 6s across a full run. Seventy mutants per build directory
+  # keeps it that way by construction rather than by luck.
+  #
+  # `timeout-minutes` is a wedge detector, not a budget: a healthy shard is
+  # about a quarter hour, so an hour means something is wrong, and it is better
+  # to be told that than to hold a runner until the six-hour ceiling.
+  #
+  # `fail-fast: false` because a shard that finds a surviving mutant is a result,
+  # not a reason to discard the fifteen still running.
+  sweep:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-05-01
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Every shard builds the same tree from the same commit, so they would
+          # otherwise write sixteen copies of one cache under keys that differ
+          # only by shard index. One key, and only the first shard saves it:
+          # sixteen simultaneous uploads of the same several hundred megabytes
+          # would all but one be discarded anyway.
+          shared-key: mutants-sweep
+          save-if: ${{ matrix.shard == 0 }}
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just,protoc,cargo-mutants,cargo-nextest
+      - run: just mutants-shard ${{ matrix.shard }} 16
+      # Uploaded whether or not the shard passed: the summary below reads these,
+      # and on a green night they are the record of what was actually scored.
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutants-shard-${{ matrix.shard }}
+          path: |
+            mutants.out/missed.txt
+            mutants.out/timeout.txt
+            mutants.out/unviable.txt
+            mutants.out/caught.txt
+            mutants.out/outcomes.json
+
+  # Sixteen shard results are sixteen job statuses, none of which says what the
+  # sweep found. This puts the whole population back together into one table on
+  # the run summary, and one status to read.
+  summary:
+    if: ${{ !cancelled() && github.event_name != 'pull_request' }}
+    needs: sweep
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: mutants-shard-*
+          path: shards/
+      - name: Collate
+        env:
+          SHARDS: 16
+        run: |
+          set -euo pipefail
+
+          # A shard that died before uploading leaves no artifact, and its share
+          # of the population is then simply absent from the totals below --
+          # which would let the sweep report green on most of the work.
+          # Absence of evidence is not the result this gate is allowed to
+          # report, so a short count fails here rather than being averaged away.
+          found=$(( $(find shards -mindepth 1 -maxdepth 1 -type d | wc -l) ))
+          if [ "$found" -ne "$SHARDS" ]; then
+            echo "::error::only $found of $SHARDS shards reported; the sweep is incomplete"
+            exit 1
+          fi
+
+          cat shards/*/missed.txt 2>/dev/null | sort > missed.txt || : > missed.txt
+          cat shards/*/timeout.txt 2>/dev/null | sort > timeout.txt || : > timeout.txt
+          cat shards/*/unviable.txt 2>/dev/null | sort > unviable.txt || : > unviable.txt
+          cat shards/*/caught.txt 2>/dev/null | sort > caught.txt || : > caught.txt
+
+          # Arithmetic expansion, because `wc` pads its output with spaces on
+          # some platforms and those spaces would land in the summary table.
+          missed=$(( $(wc -l < missed.txt) ))
+          timeout=$(( $(wc -l < timeout.txt) ))
+          caught=$(( $(wc -l < caught.txt) ))
+          unviable=$(( $(wc -l < unviable.txt) ))
+
+          {
+            echo "## Mutation sweep"
+            echo
+            echo "| Outcome | Count |"
+            echo "| --- | ---: |"
+            echo "| Caught | $caught |"
+            echo "| **Missed** | **$missed** |"
+            echo "| Timeout | $timeout |"
+            echo "| Unviable | $unviable |"
+            echo
+            # A surviving mutant is a line the suite runs without checking, so
+            # the list itself is the finding and belongs in the summary rather
+            # than behind an artifact download.
+            if [ "$missed" -gt 0 ]; then
+              echo "### Surviving mutants"
+              echo
+              echo '```'
+              cat missed.txt
+              echo '```'
+            fi
+            # A timeout is a mutant that hung rather than failed. The nextest
+            # profile ends the hanging test itself, so these should be rare;
+            # a run full of them means that profile has stopped matching the
+            # suite it was measured against.
+            if [ "$timeout" -gt 0 ]; then
+              echo "### Timed out"
+              echo
+              echo '```'
+              cat timeout.txt
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # The shard jobs already fail on their own surviving mutants. This
+          # repeats the verdict so there is one status that speaks for the whole
+          # sweep, rather than sixteen that each speak for a sixteenth of it.
+          if [ "$missed" -gt 0 ] || [ "$timeout" -gt 0 ]; then
+            echo "::error::$missed mutants survived, $timeout timed out"
+            exit 1
+          fi
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutants-sweep
+          path: |
+            missed.txt
+            timeout.txt
+            unviable.txt
+            caught.txt

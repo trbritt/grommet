@@ -565,21 +565,30 @@ impl<'a> RestoreGuard<'a> {
         if !self.armed {
             return;
         }
-        let had_work = self.summary != 0
-            || self.deferred_summary != 0
-            || self.current_bits != 0
-            || self.deferred_bits != 0;
+        // Set by the restores below rather than tested for separately. The
+        // four guards are already here and already decide something visible --
+        // whether each restore happens at all -- so reading the answer off them
+        // says exactly what a second set of `!= 0` tests would, without adding
+        // four comparisons that no reachable state can tell apart: a guard is
+        // only ever restored from inside `poll_current`, which always still
+        // holds the current word's bits, so the other three terms can never be
+        // the one that decides.
+        let mut had_work = false;
         if self.current_bits != 0 {
             self.shared.ready.restore_word(self.current_word, self.current_bits);
+            had_work = true;
         }
         if self.deferred_bits != 0 {
             self.shared.ready.restore_word(self.deferred_word, self.deferred_bits);
+            had_work = true;
         }
         if self.summary != 0 {
             self.shared.ready.restore_summary(self.summary_index, self.summary);
+            had_work = true;
         }
         if self.deferred_summary != 0 {
             self.shared.ready.restore_summary(self.deferred_summary_index, self.deferred_summary);
+            had_work = true;
         }
         self.summary = 0;
         self.deferred_summary = 0;
@@ -888,7 +897,8 @@ impl<F: Future, S: Storage<F>> Inner<F, S> {
         polling.report
     }
 
-    #[cfg(all(test, not(loom)))]
+    #[cfg(test)]
+    #[cfg(not(loom))]
     fn check_invariants(&self) -> Result<(), &'static str> {
         if self.storage.capacity() != self.wakers.len() {
             return Err("storage and waker capacities differ");
@@ -1019,7 +1029,8 @@ impl_outstanding!(BoxedOutstanding, BoxedStorage);
 /// swapped in behind [`Storage`] without the reactor above it changing.
 pub type Outstanding<F> = BoxedOutstanding<F>;
 
-#[cfg(all(test, not(loom)))]
+#[cfg(test)]
+#[cfg(not(loom))]
 mod tests {
     use super::*;
     use std::collections::HashSet;
@@ -1272,6 +1283,112 @@ mod tests {
         exercise_callback_unwind::<BoxedStorage<Countdown>>();
     }
 
+    /// Counts rings of the set's doorbell.
+    ///
+    /// The doorbell is how a restore tells the owner that work it thought was
+    /// being polled is back on the ready set. Nothing else in this suite looks
+    /// at it, which is why every mutant in `RestoreGuard::restore`'s `had_work`
+    /// and its use survived: the decision it drives was never observed.
+    struct Bell(AtomicUsize);
+
+    impl Wake for Bell {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, StdOrdering::Relaxed);
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.fetch_add(1, StdOrdering::Relaxed);
+        }
+    }
+
+    impl Bell {
+        /// Register on a set that is already loaded. A push rings, so this has
+        /// to come after the futures are in, and a ring consumes the
+        /// registration, so what it counts afterwards is only what the harvest
+        /// did.
+        fn listening_to<F: Future, S: Storage<F>>(set: &Inner<F, S>) -> Arc<Self> {
+            let bell = Arc::new(Bell(AtomicUsize::new(0)));
+            set.shared.bell.register(&Waker::from(bell.clone()));
+            bell
+        }
+
+        fn rings(&self) -> usize {
+            self.0.load(StdOrdering::Relaxed)
+        }
+    }
+
+    fn exercise_unwind_announces_the_work_it_put_back<S: Storage<Countdown>>() {
+        let mut set = Inner::<Countdown, S>::with_capacity(70);
+        for token in 0..70 {
+            set.push(countdown(0, token));
+        }
+        let bell = Bell::listening_to(&set);
+
+        let panic = catch_unwind(AssertUnwindSafe(|| {
+            set.harvest(usize::MAX, |_| panic!("callback failure"));
+        }));
+        assert!(panic.is_err());
+
+        // The unwind handed a word full of ready bits back to the set. Nobody
+        // is going to poll them unless the owner is told, and the owner may
+        // well be parked: an unwind that restores silently strands the work.
+        assert_eq!(bell.rings(), 1, "a restore that put ready bits back must wake the owner");
+    }
+
+    #[test]
+    fn an_unwind_wakes_the_owner_for_the_bits_it_restored() {
+        exercise_unwind_announces_the_work_it_put_back::<BoxedStorage<Countdown>>();
+    }
+
+    fn exercise_unwind_on_the_single_word_path<S: Storage<Countdown>>() {
+        // One word, and a cursor at zero, so the guard reaches its restore
+        // holding current bits and nothing else: no summary, no deferred
+        // summary, no deferred bits. The multiword case above always has more
+        // than one of those set at once, which makes the four terms of
+        // `had_work` indistinguishable from each other -- any one of them
+        // explains the ring. This is the shape where only one of them does.
+        let mut set = Inner::<Countdown, S>::with_capacity(8);
+        for token in 0..5 {
+            set.push(countdown(0, token));
+        }
+        let bell = Bell::listening_to(&set);
+
+        let panic = catch_unwind(AssertUnwindSafe(|| {
+            set.harvest(usize::MAX, |_| panic!("callback failure"));
+        }));
+        assert!(panic.is_err());
+        assert_eq!(bell.rings(), 1, "the current word's remaining bits still need an owner");
+    }
+
+    #[test]
+    fn an_unwind_with_only_current_bits_in_hand_still_wakes_the_owner() {
+        exercise_unwind_on_the_single_word_path::<BoxedStorage<Countdown>>();
+    }
+
+    fn exercise_a_capped_pass_is_silent<S: Storage<Countdown>>() {
+        let mut set = Inner::<Countdown, S>::with_capacity(70);
+        for token in 0..70 {
+            set.push(countdown(0, token));
+        }
+        let bell = Bell::listening_to(&set);
+
+        let report = set.harvest(4, |_| {});
+        assert_eq!(report.polled, 4);
+        assert!(report.more_ready, "the pass stopped on its budget, not on empty");
+
+        // The same restore path runs here, with bits still in hand, but the
+        // owner is the one who called `harvest` and is about to call it again.
+        // Ringing at it would be a wakeup it has to consume for news it already
+        // has, and on the shard loop that is the difference between parking and
+        // spinning.
+        assert_eq!(bell.rings(), 0, "a truncated pass returns to a caller that is already awake");
+    }
+
+    #[test]
+    fn a_pass_that_stops_on_its_budget_does_not_ring() {
+        exercise_a_capped_pass_is_silent::<BoxedStorage<Countdown>>();
+    }
+
     fn exercise_stale_wakes<S: Storage<Countdown>>() {
         let mut set = Inner::<Countdown, S>::with_capacity(1);
         set.push(countdown(0, 1));
@@ -1292,6 +1409,136 @@ mod tests {
     #[test]
     fn stale_wakes_are_safe_before_and_after_refill() {
         exercise_stale_wakes::<BoxedStorage<Countdown>>();
+    }
+
+    fn exercise_stale_wakes_move_the_cursor<S: Storage<Countdown>>() {
+        // A stale bit costs no poll budget, but it does move the cursor: the
+        // rotation has to resume past it, or the next pass starts on the same
+        // dead slot. The test above proves the bit is harmless and stops there,
+        // so where the cursor lands was never asserted -- and the cursor is the
+        // only thing this branch writes.
+        let mut set = Inner::<Countdown, S>::with_capacity(4);
+        for token in 0..4u64 {
+            set.push(countdown(0, token));
+        }
+        let stale: Vec<Waker> = (0..4).map(|slot| set.wakers[slot].clone()).collect();
+        let mut done = drain(&mut set, 4);
+        done.sort_unstable();
+        assert_eq!(done, [0, 1, 2, 3]);
+        assert!(set.is_empty(), "every slot is free, so every ready bit is now stale");
+
+        // A slot that is not the last leaves the cursor immediately past it.
+        stale[1].wake_by_ref();
+        set.harvest(4, |_| panic!("a stale wake invented output"));
+        assert_eq!(set.cursor, 2, "the rotation resumes after the stale slot, not on it");
+        assert_eq!(set.check_invariants(), Ok(()));
+
+        // The last slot wraps to the start instead of running off the end.
+        stale[3].wake_by_ref();
+        set.harvest(4, |_| panic!("a stale wake invented output"));
+        assert_eq!(set.cursor, 0, "past the last slot the rotation begins again");
+        assert_eq!(set.check_invariants(), Ok(()));
+    }
+
+    #[test]
+    fn available_reports_the_room_that_is_actually_left() {
+        // The number a caller sizes its next admission batch against. Nothing
+        // asserted on it, so it was free to answer a constant: `0` would stall
+        // a shard that believed it, and `1` would let one through at a time.
+        let mut set = BoxedOutstanding::with_capacity(4);
+        assert_eq!(set.available(), 4, "an empty set has all of its room");
+
+        set.push(countdown(0, 1));
+        set.push(countdown(0, 2));
+        assert_eq!(set.available(), 2, "two in flight, two slots left");
+
+        assert_eq!(drain(&mut set.inner, 4), [1, 2]);
+        assert_eq!(set.available(), 4, "completed futures give their slots back");
+    }
+
+    #[test]
+    fn a_stale_bit_advances_the_cursor_and_wraps_at_the_end() {
+        exercise_stale_wakes_move_the_cursor::<BoxedStorage<Countdown>>();
+    }
+
+    /// Pends forever and never wakes, so a poll of it leaves the slot occupied
+    /// and *not* ready. That is what makes a partly-ready word constructible.
+    struct Never;
+
+    impl Future for Never {
+        type Output = u64;
+
+        fn poll(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<u64> {
+            Poll::Pending
+        }
+    }
+
+    fn exercise_the_cursor_split_polls_only_what_is_ready<S: Storage<Never>>() {
+        // A capped pass leaves the cursor mid-word, and the next pass has to
+        // split that word: the bits at or above the cursor now, the bits below
+        // it on the wrap-around. Every other exercise starts from a cursor of
+        // zero, where the low half is empty and the split is `bits & 0` against
+        // `bits & !0` -- an operation that does nothing, and so an operation
+        // whose replacement also does nothing.
+        //
+        // Here the cursor is at 3 with slots 0..2 occupied but no longer ready,
+        // so a split that widened instead of narrowing would hand those three
+        // back to be polled again, and the poll count says so.
+        let mut set = Inner::<Never, S>::with_capacity(8);
+        for _ in 0..8 {
+            set.push(Never);
+        }
+
+        let first = set.harvest(3, |_| unreachable!("Never never completes"));
+        assert_eq!(first.polled, 3, "the budget stopped the pass");
+        assert_eq!(set.cursor, 3);
+
+        // Slots 0..2 have been polled and pended without waking: still
+        // occupied, no longer ready. Only 3..7 are.
+        let second = set.harvest(usize::MAX, |_| unreachable!("Never never completes"));
+        assert_eq!(second.polled, 5, "only the five slots still ready were polled");
+        assert_eq!(set.check_invariants(), Ok(()));
+    }
+
+    #[test]
+    fn a_resumed_pass_polls_only_the_slots_that_were_still_ready() {
+        exercise_the_cursor_split_polls_only_what_is_ready::<BoxedStorage<Never>>();
+    }
+
+    fn exercise_the_multiword_cursor_split<S: Storage<Never>>() {
+        // The same split, one level up. Here the cursor lands inside a word
+        // that is itself inside a summary word, so there are two places to cut:
+        // the summary word at the cursor's word, and that word at the cursor's
+        // bit. Both cuts are `& low_mask(..)` against `& !low_mask(..)`, and
+        // both are invisible from a cursor of zero.
+        const CAPACITY: usize = 200;
+        const FIRST: usize = 70;
+
+        let mut set = Inner::<Never, S>::with_capacity(CAPACITY);
+        for _ in 0..CAPACITY {
+            set.push(Never);
+        }
+
+        let first = set.harvest(FIRST, |_| unreachable!("Never never completes"));
+        assert_eq!(first.polled, FIRST);
+        assert_eq!(set.cursor, FIRST, "mid-word, and not in the first word");
+
+        // Everything before the cursor has been polled and is no longer ready.
+        // A split that widened would poll some of it again.
+        let second = set.harvest(usize::MAX, |_| unreachable!("Never never completes"));
+        assert_eq!(second.polled, CAPACITY - FIRST, "only what was still ready");
+        assert_eq!(set.check_invariants(), Ok(()));
+
+        // And with nothing ready at all, a pass polls nothing rather than
+        // rediscovering bits it already consumed.
+        let third = set.harvest(usize::MAX, |_| unreachable!("Never never completes"));
+        assert_eq!(third.polled, 0);
+        assert!(!third.more_ready);
+    }
+
+    #[test]
+    fn a_resumed_multiword_pass_polls_only_what_was_still_ready() {
+        exercise_the_multiword_cursor_split::<BoxedStorage<Never>>();
     }
 
     #[test]
@@ -1425,7 +1672,173 @@ mod tests {
 /// not modelled here: it belongs to [`crate::doorbell`], whose own models cover
 /// the register-before-check and ring-versus-close races.  The `AtomicBool`
 /// below therefore stands in for a wake rather than performing one.
-#[cfg(all(test, loom))]
+/// The ready set on its own terms.
+///
+/// Everything else in this file reaches `ReadySet` through `Outstanding`, which
+/// only ever asks it about slots that exist. Its masks are there for the bits
+/// that do not: the tail of the last word a capacity only partly fills, and the
+/// tail of the last summary word. A caller that never names those bits cannot
+/// tell a mask that clips correctly from one that clips nothing, or from one
+/// that sets every bit it was meant to clear -- which is why mutants in
+/// `valid_mask`, `summary_mask` and every `&` that applies them survived a suite
+/// that drives the set only through a reactor.
+///
+/// These address the set directly and assert the mask values and the exact bit
+/// patterns that come back, which is the only place that distinction shows.
+#[cfg(test)]
+#[cfg(not(loom))]
+mod ready_set_tests {
+    use super::*;
+
+    /// Capacities are chosen for the shapes they produce, not for their size.
+    ///
+    /// `WORD_BITS` is 64 and a summary word addresses 64 ready words, so:
+    /// 64 fills one word exactly; 8 leaves one word partly filled; 70 needs two
+    /// words with the second partly filled and one summary word; and 4,100
+    /// needs 65 words, which is what forces a second summary word and so the
+    /// only shape where `summary_mask` clips anything.
+    const ONE_WORD_EXACT: usize = 64;
+    const ONE_WORD_PART: usize = 8;
+    const TWO_WORDS_PART: usize = 70;
+    const TWO_SUMMARIES: usize = 4_100;
+
+    #[test]
+    fn valid_mask_clips_the_tail_of_a_partly_filled_word() {
+        // A capacity that fills its last word leaves nothing to clip.
+        let exact = ReadySet::new(ONE_WORD_EXACT);
+        assert_eq!(exact.valid_mask(0), u64::MAX);
+
+        let part = ReadySet::new(ONE_WORD_PART);
+        assert_eq!(part.valid_mask(0), 0b1111_1111);
+
+        // Only the *last* word is clipped; the ones before it are full.
+        let two = ReadySet::new(TWO_WORDS_PART);
+        assert_eq!(two.words(), 2);
+        assert_eq!(two.valid_mask(0), u64::MAX);
+        assert_eq!(two.valid_mask(1), low_mask(TWO_WORDS_PART % WORD_BITS));
+        assert_eq!(two.valid_mask(1), 0b11_1111);
+    }
+
+    #[test]
+    fn summary_mask_clips_the_tail_of_the_word_index() {
+        // Two words need one summary word, of which two bits name real words.
+        let two = ReadySet::new(TWO_WORDS_PART);
+        assert_eq!(two.summaries(), 1);
+        assert_eq!(two.summary_mask(0), 0b11);
+
+        // 65 words need two summary words: the first is fully used, the second
+        // names a single word. This is the only shape where the `summary + 1 ==
+        // summaries` test distinguishes anything.
+        let big = ReadySet::new(TWO_SUMMARIES);
+        assert_eq!(big.words(), 65);
+        assert_eq!(big.summaries(), 2);
+        assert_eq!(big.summary_mask(0), u64::MAX);
+        assert_eq!(big.summary_mask(1), 0b1);
+    }
+
+    #[test]
+    fn an_untouched_set_has_nothing_ready() {
+        // Each arm of `has_ready` separately: no words, one word, many words.
+        assert!(!ReadySet::new(0).has_ready());
+        assert!(!ReadySet::new(ONE_WORD_EXACT).has_ready());
+        assert!(!ReadySet::new(ONE_WORD_PART).has_ready());
+        assert!(!ReadySet::new(TWO_WORDS_PART).has_ready());
+        assert!(!ReadySet::new(TWO_SUMMARIES).has_ready());
+    }
+
+    #[test]
+    fn has_ready_tracks_marks_and_takes() {
+        let single = ReadySet::new(ONE_WORD_PART);
+        assert!(single.mark(3));
+        assert!(single.has_ready());
+        assert_eq!(single.take_single(), 1 << 3);
+        assert!(!single.has_ready());
+
+        let multi = ReadySet::new(TWO_WORDS_PART);
+        assert!(multi.mark(65));
+        assert!(multi.has_ready());
+        assert_eq!(multi.take_summary(0), 1 << 1);
+        assert_eq!(multi.take_word(1), 1 << 1);
+        assert!(!multi.has_ready());
+    }
+
+    #[test]
+    fn mark_reports_only_the_transition_to_ready() {
+        let ready = ReadySet::new(TWO_WORDS_PART);
+        assert!(ready.mark(9), "the first mark of a slot is the one that rings");
+        assert!(!ready.mark(9), "a second mark of a live bit announces nothing");
+        // A different slot in the same word is still its own transition.
+        assert!(ready.mark(10));
+    }
+
+    #[test]
+    fn take_summary_names_only_the_words_that_were_announced() {
+        let ready = ReadySet::new(TWO_SUMMARIES);
+        ready.mark(WORD_BITS * 2 + 5);
+        // Exactly the announced word, not every word the mask permits.
+        assert_eq!(ready.take_summary(0), 1 << 2);
+        assert_eq!(ready.take_word(2), 1 << 5);
+    }
+
+    #[test]
+    fn take_word_yields_only_the_slots_that_were_marked() {
+        let ready = ReadySet::new(TWO_WORDS_PART);
+        ready.mark(64);
+        ready.mark(69);
+        // The last word holds six valid bits; the take must not invent the rest.
+        assert_eq!(ready.take_word(1), (1 << 0) | (1 << 5));
+        assert_eq!(ready.take_word(1), 0, "a take clears what it returned");
+    }
+
+    #[test]
+    fn restore_puts_back_exactly_what_was_taken() {
+        let ready = ReadySet::new(TWO_WORDS_PART);
+        ready.mark(2);
+        ready.mark(64);
+
+        let summary = ready.take_summary(0);
+        let word0 = ready.take_word(0);
+        let word1 = ready.take_word(1);
+        assert_eq!(summary, 0b11);
+        assert_eq!(word0, 1 << 2);
+        assert_eq!(word1, 1 << 0);
+
+        ready.restore_word(0, word0);
+        ready.restore_word(1, word1);
+        ready.restore_summary(0, summary);
+
+        // Byte for byte, not merely non-empty: a restore that widened what it
+        // was given would hand the reactor slots nobody marked.
+        assert_eq!(ready.take_summary(0), summary);
+        assert_eq!(ready.take_word(0), word0);
+        assert_eq!(ready.take_word(1), word1);
+    }
+
+    #[test]
+    fn restoring_nothing_leaves_the_set_empty() {
+        let ready = ReadySet::new(TWO_WORDS_PART);
+        ready.restore_word(1, 0);
+        ready.restore_summary(0, 0);
+        assert!(!ready.has_ready());
+        assert_eq!(ready.take_word(1), 0);
+    }
+
+    #[test]
+    fn a_restore_re_announces_the_word_it_refilled() {
+        // The announcement is what a later scan finds the word by, so a restore
+        // into an emptied word has to put the summary bit back with it.
+        let ready = ReadySet::new(TWO_WORDS_PART);
+        ready.mark(64);
+        let word = ready.take_word(1);
+        assert_eq!(ready.take_summary(0), 1 << 1);
+
+        ready.restore_word(1, word);
+        assert_eq!(ready.take_summary(0), 1 << 1, "the refilled word is announced again");
+    }
+}
+
+#[cfg(test)]
+#[cfg(loom)]
 mod loom_tests {
     use super::{ReadySet, low_mask};
     use loom::sync::Arc;

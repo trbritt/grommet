@@ -197,7 +197,8 @@ impl std::fmt::Debug for WakerSlot {
     }
 }
 
-#[cfg(all(test, not(loom)))]
+#[cfg(test)]
+#[cfg(not(loom))]
 mod tests {
     use super::*;
     use std::sync::Arc;
@@ -347,7 +348,8 @@ mod tests {
 /// AtomicWaker`: the atomics and the `UnsafeCell` below are loom's under
 /// `--cfg loom`, so loom explores the handoff itself and checks that no two
 /// threads are ever inside the cell at once.
-#[cfg(all(test, loom))]
+#[cfg(test)]
+#[cfg(loom)]
 mod loom_tests {
     use super::*;
     use loom::sync::atomic::{AtomicBool, Ordering};
